@@ -15,7 +15,7 @@
 
 #define INVALID_BM_ID -777
 #define MAX_LOGMSG_FMT_LENGTH 1024
-#define MAX_FILENAME_LENGTH 256
+#define MAX_FILENAME_LENGTH 4096
 #define INVALID_FSIZE -1
 
 class BaseBMInstance {
