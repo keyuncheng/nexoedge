@@ -46,7 +46,7 @@ target_link_libraries( metastore_test ncloud_metastore glog )
 #######################
 # Collection of tests #
 #######################
-set ( ncloud_unit_tests coding_test container_test coordinator_test agent_test zmq_client_test )
+set ( ncloud_unit_tests coding_test container_test coordinator_test agent_test zmq_client_test metastore_test )
 add_custom_target( tests )
 add_dependencies( tests ${ncloud_unit_tests} )
 

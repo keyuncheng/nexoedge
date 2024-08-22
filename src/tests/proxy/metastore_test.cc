@@ -295,12 +295,13 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-MetaStore *newMetaStore() {
+MetaStore *newMetaStore(void) {
     Config &config = Config::getInstance();
     
     switch (config.getProxyMetaStoreType()) {
     case MetaStoreType::REDIS:
         return new RedisMetaStore();
+    }
     return new RedisMetaStore();
 }
 
