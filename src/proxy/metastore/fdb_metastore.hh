@@ -174,12 +174,16 @@ private:
     td::string _taskScanIt;
     bool _endOfPendingWriteSet;
 
+    // FDB operations
     void exitOnError(fdb_error_t err);
     void runNetwork(void *dummy);
     FDBDatabase *getDatabase(const char *clusterFile);
-
     string getValue(string key);
     void setValueAndCommit(string key, string value);
+
+    // helper functions (mostly copied from RedisMetaStore)
+    int genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
+    std::string getFilePrefix(const char name[], bool noEndingSlash = false);
 }
 
 #endif // define __FDB_METASTORE_HH__

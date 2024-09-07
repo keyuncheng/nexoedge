@@ -57,6 +57,28 @@ FDBMetaStore::~FDBMetaStore()
     pthread_join(fdb_network_thread, NULL);
 }
 
+bool FDBMetaStore::putMeta(const File &f)
+{
+    std::lock_guard<std::mutex> lk(_lock);
+    char filename[PATH_MAX], vfilename[PATH_MAX], vlname[PATH_MAX];
+    int nameLength = genFileKey(f.namespaceId, f.name, f.nameLength, filename);
+    int vlnameLength = 0;
+    std::string prefix = getFilePrefix(filename);
+    int curVersion = -1;
+}
+
+bool FDBMetaStore::getMeta(File &f, int getBlocks)
+{
+}
+
+bool FDBMetaStore::deleteMeta(File &f)
+{
+}
+
+bool FDBMetaStore::renameMeta(File &sf, File &df)
+{
+}
+
 void FDBMetaStore::exitOnError(fdb_error_t err)
 {
     if (err)
@@ -129,4 +151,24 @@ void FDBMetaStore::setValueAndCommit(string key, string value)
     LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
 
     return;
+}
+
+int FDBMetaStore::genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[])
+{
+
+    return snprintf(key, PATH_MAX, "%d_%*s", namespaceId, nameLength, name);
+}
+
+std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
+{
+    const char *slash = strrchr(name, '/'), *us = strchr(name, '_');
+    std::string prefix("//pf_");
+    // file on root directory, or root directory (ends with one '/')
+    if (slash == NULL || us + 1 == slash)
+    {
+        prefix.append(name, us - name + 1);
+        return noEndingSlash ? prefix : prefix.append("/");
+    }
+    // sub-directory
+    return prefix.append(name, slash - name);
 }
