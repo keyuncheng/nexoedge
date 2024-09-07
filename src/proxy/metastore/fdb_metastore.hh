@@ -21,7 +21,7 @@
 #include "metastore.hh"
 
 // hard-code constants
-const std::string cluster_file = "/usr/local/etc/foundationdb/fdb.cluster";
+const std::string _clusterFile = "/usr/local/etc/foundationdb/fdb.cluster";
 
 class FDBMetaStore : public MetaStore
 {
@@ -165,9 +165,21 @@ public:
     bool fileHasJournal(const File &file);
 
 private:
+    // FDB-based variables
     fdb_error fdb_err;
     pthread_t fdb_network_thread;
-    FDBDatabase *fdb = nullptr;
+    FDBDatabase *fdb;
+
+    std::mutex _lock;
+    td::string _taskScanIt;
+    bool _endOfPendingWriteSet;
+
+    void exitOnError(fdb_error_t err);
+    void runNetwork(void *dummy);
+    FDBDatabase *getDatabase(const char *clusterFile);
+
+    string getValue(string key);
+    void setValueAndCommit(string key, string value);
 }
 
 #endif // define __FDB_METASTORE_HH__
