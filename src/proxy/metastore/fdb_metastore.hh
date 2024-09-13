@@ -16,12 +16,13 @@
 
 #define FDB_API_VERSION 730 // FDB client api version (must be specified before implementation)
 #include <foundationdb/fdb_c.h>
+#include <foundationdb/fdb_c_options.g.h>
 #include <boost/uuid/uuid.hpp>
 
 #include "metastore.hh"
 
 // hard-code constants
-const std::string _clusterFile = "/usr/local/etc/foundationdb/fdb.cluster";
+const std::string _FDBClusterFile = "/etc/foundationdb/fdb.cluster";
 
 class FDBMetaStore : public MetaStore
 {
@@ -166,24 +167,23 @@ public:
 
 private:
     // FDB-based variables
-    fdb_error fdb_err;
-    pthread_t fdb_network_thread;
-    FDBDatabase *fdb;
+    pthread_t _fdb_network_thread;
+    FDBDatabase *_db;
 
     std::mutex _lock;
-    td::string _taskScanIt;
+    std::string _taskScanIt;
     bool _endOfPendingWriteSet;
 
     // FDB operations
     void exitOnError(fdb_error_t err);
-    void runNetwork(void *dummy);
-    FDBDatabase *getDatabase(const char *clusterFile);
-    string getValue(string key);
-    void setValueAndCommit(string key, string value);
+    static void *runNetwork(void *args);
+    FDBDatabase *getDatabase(std::string clusterFile);
+    std::string getValue(std::string key);
+    void setValueAndCommit(std::string key, std::string value);
 
     // helper functions (mostly copied from RedisMetaStore)
     int genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
     std::string getFilePrefix(const char name[], bool noEndingSlash = false);
-}
+};
 
 #endif // define __FDB_METASTORE_HH__

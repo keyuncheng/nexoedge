@@ -5,7 +5,7 @@
 file( GLOB metastore_source metastore/*.cc )
 add_library( ncloud_metastore STATIC EXCLUDE_FROM_ALL ${metastore_source} )
 add_dependencies( ncloud_metastore hiredis-cli )
-target_link_libraries( ncloud_metastore ncloud_common hiredis event )
+target_link_libraries( ncloud_metastore ncloud_common hiredis event fdb_c m rt)
 
 ###################
 ## Proxy Staging ##
@@ -59,7 +59,7 @@ function ( ncloud_build_proxy component )
     add_ncloud_install_target( ncloud_zmq_client ${component} )
     add_ncloud_sample_config( ${component} )
     add_ncloud_install_service( ${PROJECT_SOURCE_DIR}/scripts/package/ncloud-proxy.service ${component} )
-    add_ncloud_install_libs( "lib(zmq|hiredis|isal|glog)" ${component} )
+    add_ncloud_install_libs( "lib(zmq|hiredis|isal|glog|fdb_c|m|rt)" ${component} )
 endfunction ( ncloud_build_proxy )
 
 set( proxy_package_depends_list

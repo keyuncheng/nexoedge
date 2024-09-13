@@ -163,6 +163,7 @@ enum HostType {
 
 enum MetaStoreType {
     REDIS,
+    FDB,
 
     UNKNOWN_METASTORE
 };

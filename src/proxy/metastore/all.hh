@@ -5,5 +5,6 @@
 
 #include "metastore.hh"
 #include "redis_metastore.hh"
+#include "fdb_metastore.hh"
 
 #endif //__PROXY_METASTORE_ALL_HH__

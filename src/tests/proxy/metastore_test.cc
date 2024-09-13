@@ -10,6 +10,7 @@
 #include "../../common/checksum_calculator.hh"
 #include "../../proxy/metastore/metastore.hh"
 #include "../../proxy/metastore/redis_metastore.hh"
+#include "../../proxy/metastore/fdb_metastore.hh"
 
 static const size_t numFilesToTest = 1024;
 static const int maxFileNameLength = 1024;
@@ -301,6 +302,8 @@ MetaStore *newMetaStore(void) {
     switch (config.getProxyMetaStoreType()) {
     case MetaStoreType::REDIS:
         return new RedisMetaStore();
+    case MetaStoreType::FDB:
+        return new FDBMetaStore();
     }
     return new RedisMetaStore();
 }

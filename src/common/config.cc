@@ -54,6 +54,7 @@ const char *Config::ChunkScanSamplingPolicyName[] = {
 // see MetaStore in common/define.hh
 const char *Config::MetaStoreName[] = {
     "Redis",
+    "FDB",
 
     "Unknown"
 };
@@ -293,6 +294,9 @@ void Config::setConfigPath (const char *generalPath, const char *proxyPath, cons
                 LOG(ERROR) << "Port number for metastore must be within 0 and 65536";
                 exit(-1);
             }
+            break;
+        case MetaStoreType::FDB:
+            // currently set no parameters
             break;
         default:
             break;
@@ -1011,6 +1015,9 @@ void Config::printConfig() const {
                 , getProxyMetaStoreIP().c_str()
                 , getProxyMetaStorePort()
             );
+            break;
+        case MetaStoreType::FDB:
+            // currently set no print message
             break;
         }
         int numClasses = getNumStorageClasses();
