@@ -63,11 +63,73 @@ FDBMetaStore::~FDBMetaStore()
 bool FDBMetaStore::putMeta(const File &f)
 {
     std::lock_guard<std::mutex> lk(_lock);
-    // char filename[PATH_MAX], vfilename[PATH_MAX], vlname[PATH_MAX];
-    // int nameLength = genFileKey(f.namespaceId, f.name, f.nameLength, filename);
-    // int vlnameLength = 0;
-    // std::string prefix = getFilePrefix(filename);
-    // int curVersion = -1;
+    char filename[PATH_MAX], vfilename[PATH_MAX], vlname[PATH_MAX];
+    int nameLength = genFileKey(f.namespaceId, f.name, f.nameLength, filename);
+    int vlnameLength = 0;
+    std::string prefix = getFilePrefix(filename);
+    int curVersion = -1;
+
+    // find the current version
+    std::string key = filename + "_ver";
+    std::pair<bool, std::string> vr = getValue(key);
+
+    if (vr.first == true) {
+        curVersion = std::stoi(vr.second);
+    }
+
+    // backup the metadata of previous version first if versioning is enabled and verison is newer than the current one
+    Config &config = Config::getInstance();
+    bool keepVersion = !config.overwriteFiles();
+    if (keepVersion && curVersion != -1 && f.version > curVersion) {
+        int vnameLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version - 1, vfilename);
+        // TODO clone instead of put after rename
+        // TODO these steps need to be an atomic transaction with HMSET, otherwise metadata can be inconsistent
+        redisReply *r = (redisReply*) redisCommand(
+            _cxt
+            , "RENAME %b %b"
+            , filename, (size_t) nameLength
+            , vfilename, (size_t) vnameLength
+        );
+        if (r == NULL || strncmp(r->str,"OK", 2) != 0) {
+            if (r == NULL)
+                redisReconnect(_cxt);
+            LOG(ERROR) << "Failed to backup the previous version " << f.version - 1 << " metadata for file " << f.name;
+            freeReplyObject(r);
+            return false;
+        }
+        freeReplyObject(r);
+        r = (redisReply*) redisCommand(
+            _cxt
+            , "HMGET %b size mtime md5 dm numC"
+            , vfilename, (size_t) vnameLength
+        );
+        // create a set of versions (version_list [verison] -> "version size timestamp md5 dm") for this file name
+        vlnameLength = genFileVersionListKey(f.namespaceId, f.name, f.nameLength, vlname);
+        std::string fsummary;
+        fsummary.append(std::to_string(f.version - 1)).append(" ");
+        if (r && r->type == REDIS_REPLY_ARRAY) {
+            size_t total = 5;
+            for (size_t i = 0; i < total; i++) {
+                if (r->elements >= i && r->element[i]->type == REDIS_REPLY_STRING) {
+                    fsummary.append(r->element[i]->str, r->element[i]->len);
+                } else {
+                    fsummary.append("-");
+                }
+                if (i + 1 < total) fsummary.append(" ");
+            }
+        }
+        freeReplyObject(r);
+        r = (redisReply*) redisCommand(
+            _cxt
+            , "ZADD %b %d %b"
+            , vlname, (size_t) vlnameLength
+            , f.version - 1
+            , fsummary.c_str(), fsummary.size()
+        );
+        LOG(INFO) << "File summary of " << vlname << " version " << f.version << " is >" << fsummary.c_str() << "<";
+        freeReplyObject(r);
+    }
+
 
     return true;
 }
@@ -208,7 +270,7 @@ FDBDatabase *FDBMetaStore::getDatabase(std::string clusterFile)
     return db;
 }
 
-std::string FDBMetaStore::getValue(std::string key)
+std::pair<bool, std::string> FDBMetaStore::getValue(std::string key)
 {
     // create transaction
     FDBTransaction *tx;
@@ -222,10 +284,12 @@ std::string FDBMetaStore::getValue(std::string key)
     exitOnError(fdb_future_get_value(fget, &key_present, &value, &value_length));
     fdb_future_destroy(fget);
 
+    bool is_found = false;
     std::string ret_val;
     // DEBUG
     if (key_present)
     {
+        is_found = true;
         ret_val = reinterpret_cast<const char *>(value);
         LOG(INFO)
             << "FDBMetaStore:: getValue(); key: " << key << ", value: " << ret_val;
@@ -238,7 +302,7 @@ std::string FDBMetaStore::getValue(std::string key)
     // destroy transaction; no need to commit read-only transaction
     fdb_transaction_destroy(tx);
 
-    return ret_val;
+    return std::pair<bool, std::string>(is_found, ret_val);
 }
 
 void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
@@ -260,9 +324,13 @@ void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
 
 int FDBMetaStore::genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[])
 {
-
     return snprintf(key, PATH_MAX, "%d_%*s", namespaceId, nameLength, name);
 }
+
+int FDBMetaStore::genFileVersionListKey(unsigned char namespaceId, const char *name, int nameLength, char key[]) {
+    return snprintf(key, PATH_MAX, "//vl%d_%*s", namespaceId, nameLength, name);
+}
+
 
 std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
 {

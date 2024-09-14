@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <mutex>
 #include <string>
+#include <utility>
 
 // See also: https://apple.github.io/foundationdb/api-c.html
 
@@ -178,7 +179,7 @@ private:
     void exitOnError(fdb_error_t err);
     static void *runNetwork(void *args);
     FDBDatabase *getDatabase(std::string clusterFile);
-    std::string getValue(std::string key);
+    std::pair<bool, std::string> getValue(std::string key);
     void setValueAndCommit(std::string key, std::string value);
 
     // helper functions (mostly copied from RedisMetaStore)
