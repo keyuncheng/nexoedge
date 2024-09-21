@@ -63,73 +63,72 @@ FDBMetaStore::~FDBMetaStore()
 bool FDBMetaStore::putMeta(const File &f)
 {
     std::lock_guard<std::mutex> lk(_lock);
-    char filename[PATH_MAX], vfilename[PATH_MAX], vlname[PATH_MAX];
-    int nameLength = genFileKey(f.namespaceId, f.name, f.nameLength, filename);
-    int vlnameLength = 0;
-    std::string prefix = getFilePrefix(filename);
-    int curVersion = -1;
+    char fileKey[PATH_MAX];
 
-    // find the current version
-    std::string key = filename + "_ver";
-    std::pair<bool, std::string> vr = getValue(key);
+    // file key (format: namespace_filename)
+    int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
+    // file prefix
+    std::string filePrefix = getFilePrefix(fileKey);
 
-    if (vr.first == true) {
-        curVersion = std::stoi(vr.second);
-    }
+    // TODO: find current version of the file, and perform updates accordingly
+    int curFileVersion = -1;
 
-    // backup the metadata of previous version first if versioning is enabled and verison is newer than the current one
-    Config &config = Config::getInstance();
-    bool keepVersion = !config.overwriteFiles();
-    if (keepVersion && curVersion != -1 && f.version > curVersion) {
-        int vnameLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version - 1, vfilename);
-        // TODO clone instead of put after rename
-        // TODO these steps need to be an atomic transaction with HMSET, otherwise metadata can be inconsistent
-        redisReply *r = (redisReply*) redisCommand(
-            _cxt
-            , "RENAME %b %b"
-            , filename, (size_t) nameLength
-            , vfilename, (size_t) vnameLength
-        );
-        if (r == NULL || strncmp(r->str,"OK", 2) != 0) {
-            if (r == NULL)
-                redisReconnect(_cxt);
-            LOG(ERROR) << "Failed to backup the previous version " << f.version - 1 << " metadata for file " << f.name;
-            freeReplyObject(r);
-            return false;
-        }
-        freeReplyObject(r);
-        r = (redisReply*) redisCommand(
-            _cxt
-            , "HMGET %b size mtime md5 dm numC"
-            , vfilename, (size_t) vnameLength
-        );
-        // create a set of versions (version_list [verison] -> "version size timestamp md5 dm") for this file name
-        vlnameLength = genFileVersionListKey(f.namespaceId, f.name, f.nameLength, vlname);
-        std::string fsummary;
-        fsummary.append(std::to_string(f.version - 1)).append(" ");
-        if (r && r->type == REDIS_REPLY_ARRAY) {
-            size_t total = 5;
-            for (size_t i = 0; i < total; i++) {
-                if (r->elements >= i && r->element[i]->type == REDIS_REPLY_STRING) {
-                    fsummary.append(r->element[i]->str, r->element[i]->len);
-                } else {
-                    fsummary.append("-");
-                }
-                if (i + 1 < total) fsummary.append(" ");
-            }
-        }
-        freeReplyObject(r);
-        r = (redisReply*) redisCommand(
-            _cxt
-            , "ZADD %b %d %b"
-            , vlname, (size_t) vlnameLength
-            , f.version - 1
-            , fsummary.c_str(), fsummary.size()
-        );
-        LOG(INFO) << "File summary of " << vlname << " version " << f.version << " is >" << fsummary.c_str() << "<";
-        freeReplyObject(r);
-    }
+    // set metadata for the file<curFileVersion>, format: serialized JSON
+    // string
+    bool isEmptyFile = f.size == 0;
+    unsigned char *codingState = isEmptyFile || f.codingMeta.codingState == NULL ? (unsigned char *)"" : f.codingMeta.codingState;
+    int deleted = isEmptyFile ? f.isDeleted : 0;
+    size_t numUniqueBlocks = f.uniqueBlocks.size();
+    size_t numDuplicateBlocks = f.duplicateBlocks.size();
 
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // key: filename, value: JSON obj string
+    nlohmann::json *j = new nlohmann::json();
+
+    // records for a particular version
+    nlohmann::json *vj = new nlohmann::json();
+    vj->["vfkey"] = std::to_string(???); // versioned file key
+    vj->["name"] = std::string(f.name, f.name + f.nameLength);
+    vj->["uuid"] = boost::uuids::to_string(f.uuid);
+    vj->["size"] = std::to_string(f.size);
+    vj->["numC"] = std::to_string(f.numChunks);
+    vj->["sc"] = std::to_string();
+    vj->["cs"] = std::to_string();
+    vj->["n"] = std::to_string();
+    vj->["k"] = std::to_string();
+    vj->["f"] = std::to_string();
+    vj->["maxCS"] = std::to_string();
+    vj->["codingStateS"] = std::to_string();
+    vj->["numS"] = std::to_string();
+    vj->["ver"] = std::to_string();
+    vj->["ctime"] = std::to_string();
+    vj->["atime"] = std::to_string();
+    vj->["mtime"] = std::to_string();
+    vj->["tctime"] = std::to_string();
+    vj->["md5"] = std::to_string();
+    vj->["sg_size"] = std::to_string();
+    vj->["sg_sc"] = std::to_string();
+    vj->["sg_cs"] = std::to_string();
+    vj->["sg_n"] = std::to_string();
+    vj->["sg_k"] = std::to_string();
+    vj->["sg_f"] = std::to_string();
+    vj->["sg_maxCS"] = std::to_string();
+    vj->["sg_mtime"] = std::to_string();
+    vj->["dm"] = std::to_string();
+    vj->["numUB"] = std::to_string();
+    vj->["numDB"] = std::to_string();
+
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
+
+    FDBFuture *fset = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(fset));
+
+    fdb_future_destroy(fset);
+
+    LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
 
     return true;
 }
@@ -149,96 +148,118 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     return true;
 }
 
-bool FDBMetaStore::updateTimestamps(const File &f) {
+bool FDBMetaStore::updateTimestamps(const File &f)
+{
     return true;
 }
 
-int FDBMetaStore::updateChunks(const File &f, int version) {
+int FDBMetaStore::updateChunks(const File &f, int version)
+{
     return true;
 }
 
-bool FDBMetaStore::getFileName(boost::uuids::uuid fuuid, File &f) {
+bool FDBMetaStore::getFileName(boost::uuids::uuid fuuid, File &f)
+{
     return true;
 }
-    
-unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceId, bool withSize, bool withTime, bool withVersions, std::string prefix) {
+
+unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceId, bool withSize, bool withTime, bool withVersions, std::string prefix)
+{
     return 0;
 }
 
-unsigned int FDBMetaStore::getFolderList(std::vector<std::string> &list, unsigned char namespaceId, std::string prefix, bool skipSubfolders) {
+unsigned int FDBMetaStore::getFolderList(std::vector<std::string> &list, unsigned char namespaceId, std::string prefix, bool skipSubfolders)
+{
     return 0;
 }
 
-unsigned long int FDBMetaStore::getMaxNumKeysSupported() {
+unsigned long int FDBMetaStore::getMaxNumKeysSupported()
+{
     return 0;
 }
 
-unsigned long int FDBMetaStore::getNumFiles() {
+unsigned long int FDBMetaStore::getNumFiles()
+{
     return 0;
 }
 
-unsigned long int FDBMetaStore::getNumFilesToRepair() {
+unsigned long int FDBMetaStore::getNumFilesToRepair()
+{
     return 0;
 }
 
-int FDBMetaStore::getFilesToRepair(int numFiles, File files[]) {
+int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
+{
     return 0;
 }
 
-bool FDBMetaStore::markFileAsNeedsRepair(const File &file) {
+bool FDBMetaStore::markFileAsNeedsRepair(const File &file)
+{
     return false;
 }
 
-bool FDBMetaStore::markFileAsRepaired(const File &file) {
+bool FDBMetaStore::markFileAsRepaired(const File &file)
+{
     return false;
 }
 
-bool FDBMetaStore::markFileAsPendingWriteToCloud(const File &file) {
+bool FDBMetaStore::markFileAsPendingWriteToCloud(const File &file)
+{
     return false;
 }
 
-bool FDBMetaStore::markFileAsWrittenToCloud(const File &file, bool removePending) {
+bool FDBMetaStore::markFileAsWrittenToCloud(const File &file, bool removePending)
+{
     return false;
 }
 
-int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[]) {
+int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
+{
     return false;
 }
 
-bool FDBMetaStore::updateFileStatus(const File &file) {
+bool FDBMetaStore::updateFileStatus(const File &file)
+{
     return true;
 }
 
-bool FDBMetaStore::getNextFileForTaskCheck(File &file) {
+bool FDBMetaStore::getNextFileForTaskCheck(File &file)
+{
     return true;
 }
 
-bool FDBMetaStore::lockFile(const File &file) {
+bool FDBMetaStore::lockFile(const File &file)
+{
     return true;
 }
 
-bool FDBMetaStore::unlockFile(const File &file) {
+bool FDBMetaStore::unlockFile(const File &file)
+{
     return true;
 }
 
-bool FDBMetaStore::addChunkToJournal(const File &file, const Chunk &chunk, int containerId, bool isWrite) {
+bool FDBMetaStore::addChunkToJournal(const File &file, const Chunk &chunk, int containerId, bool isWrite)
+{
     extractJournalFieldKeyParts("", 0);
     return true;
 }
 
-bool FDBMetaStore::updateChunkInJournal(const File &file, const Chunk &chunk, bool isWrite, bool deleteRecord, int containerId) {
+bool FDBMetaStore::updateChunkInJournal(const File &file, const Chunk &chunk, bool isWrite, bool deleteRecord, int containerId)
+{
     return true;
 }
 
-void FDBMetaStore::getFileJournal(const FileInfo &file, std::vector<std::tuple<Chunk, int /* container id*/, bool /* isWrite */, bool /* isPre */>> &records) {
-    
+void FDBMetaStore::getFileJournal(const FileInfo &file, std::vector<std::tuple<Chunk, int /* container id*/, bool /* isWrite */, bool /* isPre */>> &records)
+{
 }
 
-int FDBMetaStore::getFilesWithJounal(FileInfo **list) {
+int FDBMetaStore::getFilesWithJounal(FileInfo **list)
+{
     return 0;
 }
 
-bool FDBMetaStore::fileHasJournal(const File &file) {
+bool FDBMetaStore::fileHasJournal(const File &file)
+{
     return true;
 }
 
@@ -255,7 +276,8 @@ void FDBMetaStore::exitOnError(fdb_error_t err)
 void *FDBMetaStore::runNetwork(void *args)
 {
     fdb_error_t err = fdb_run_network();
-    if (err) {
+    if (err)
+    {
         LOG(ERROR) << "FDBMetaStore::runNetwork fdb_run_network() error";
         exit(1);
     }
@@ -327,10 +349,10 @@ int FDBMetaStore::genFileKey(unsigned char namespaceId, const char *name, int na
     return snprintf(key, PATH_MAX, "%d_%*s", namespaceId, nameLength, name);
 }
 
-int FDBMetaStore::genFileVersionListKey(unsigned char namespaceId, const char *name, int nameLength, char key[]) {
+int FDBMetaStore::genFileVersionListKey(unsigned char namespaceId, const char *name, int nameLength, char key[])
+{
     return snprintf(key, PATH_MAX, "//vl%d_%*s", namespaceId, nameLength, name);
 }
-
 
 std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
 {
@@ -346,22 +368,24 @@ std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
     return prefix.append(name, slash - name);
 }
 
-std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char *field, size_t fieldLength) {
+std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char *field, size_t fieldLength)
+{
     std::string fieldKey(field, fieldLength);
 
     // expected format 'c<chunk_id>-<type>-<container_id>', e.g., c00-op-1
     size_t delimiter1 = fieldKey.find("-");
     size_t delimiter2 = fieldKey.find("-", delimiter1 + 1);
-    if (delimiter1 == std::string::npos || delimiter2 == std::string::npos) {
+    if (delimiter1 == std::string::npos || delimiter2 == std::string::npos)
+    {
         return std::make_tuple(INVALID_CHUNK_ID, "", INVALID_CONTAINER_ID);
     }
 
     int chunkId, containerId;
     std::string type;
     // first part is 'c[0-9]+'
-    chunkId = strtol(fieldKey.substr(1, delimiter1-1).c_str(), NULL, 10);
+    chunkId = strtol(fieldKey.substr(1, delimiter1 - 1).c_str(), NULL, 10);
     // second part is a string
-    type = fieldKey.substr(delimiter1 + 1, delimiter2-delimiter1-1);
+    type = fieldKey.substr(delimiter1 + 1, delimiter2 - delimiter1 - 1);
     // third part is a '[0-9]+'
     containerId = strtol(fieldKey.substr(delimiter2 + 1).c_str(), NULL, 10);
 

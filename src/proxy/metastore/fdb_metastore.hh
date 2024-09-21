@@ -19,6 +19,7 @@
 #include <foundationdb/fdb_c.h>
 #include <foundationdb/fdb_c_options.g.h>
 #include <boost/uuid/uuid.hpp>
+#include <nlohmann/json.hpp>
 
 #include "metastore.hh"
 
