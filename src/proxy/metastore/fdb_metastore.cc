@@ -78,7 +78,7 @@ bool FDBMetaStore::putMeta(const File &f)
     bool isEmptyFile = f.size == 0;
     unsigned char *codingState = isEmptyFile || f.codingMeta.codingState == NULL ? (unsigned char *)"" : f.codingMeta.codingState;
     int deleted = isEmptyFile ? f.isDeleted : 0;
-    size_t numUniqueBlocks = f.uniqueBlocks.size();
+    size_t numUniqueBlocks = ;
     size_t numDuplicateBlocks = f.duplicateBlocks.size();
 
     // create transaction
@@ -88,45 +88,106 @@ bool FDBMetaStore::putMeta(const File &f)
     // key: filename, value: JSON obj string
     nlohmann::json *j = new nlohmann::json();
 
-    // records for a particular version
+    // records for the current version
+    char verFileKey[PATH_MAX];
+    int vnameLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
+
     nlohmann::json *vj = new nlohmann::json();
-    vj->["vfkey"] = std::to_string(???); // versioned file key
     vj->["name"] = std::string(f.name, f.name + f.nameLength);
     vj->["uuid"] = boost::uuids::to_string(f.uuid);
     vj->["size"] = std::to_string(f.size);
     vj->["numC"] = std::to_string(f.numChunks);
-    vj->["sc"] = std::to_string();
-    vj->["cs"] = std::to_string();
-    vj->["n"] = std::to_string();
-    vj->["k"] = std::to_string();
-    vj->["f"] = std::to_string();
-    vj->["maxCS"] = std::to_string();
-    vj->["codingStateS"] = std::to_string();
-    vj->["numS"] = std::to_string();
-    vj->["ver"] = std::to_string();
-    vj->["ctime"] = std::to_string();
-    vj->["atime"] = std::to_string();
-    vj->["mtime"] = std::to_string();
-    vj->["tctime"] = std::to_string();
-    vj->["md5"] = std::to_string();
-    vj->["sg_size"] = std::to_string();
-    vj->["sg_sc"] = std::to_string();
-    vj->["sg_cs"] = std::to_string();
-    vj->["sg_n"] = std::to_string();
-    vj->["sg_k"] = std::to_string();
-    vj->["sg_f"] = std::to_string();
-    vj->["sg_maxCS"] = std::to_string();
-    vj->["sg_mtime"] = std::to_string();
-    vj->["dm"] = std::to_string();
-    vj->["numUB"] = std::to_string();
-    vj->["numDB"] = std::to_string();
+    vj->["sc"] = f.storageClass;
+    vj->["cs"] = std::string(f.codingMeta.coding);
+    vj->["n"] = std::to_string(f.codingMeta.n);
+    vj->["k"] = std::to_string(f.codingMeta.k);
+    vj->["f"] = std::to_string(f.codingMeta.f);
+    vj->["maxCS"] = std::to_string(f.codingMeta.maxChunkSize);
+    vj->["codingStateS"] = std::to_string(f.codingMeta.codingStateSize);
+    vj->["codingState"] = std::string(codingState);
+    vj->["numS"] = std::string(f.numStripes);
+    vj->["ver"] = std::to_string(f.version);
+    vj->["ctime"] = std::to_string(f.ctime);
+    vj->["atime"] = std::to_string(f.atime);
+    vj->["mtime"] = std::to_string(f.mtime);
+    vj->["tctime"] = std::to_string(f.tctime);
+    vj->["md5"] = std::string(f.md5, f.md5 + MD5_DIGEST_LENGTH);
+    vj->["sg_size"] = std::to_string(f.staged.size);
+    vj->["sg_sc"] = f.staged.storageClass;
+    vj->["sg_cs"] = std::to_string(f.staged.codingMeta.coding);
+    vj->["sg_n"] = std::to_string(f.staged.codingMeta.n);
+    vj->["sg_k"] = std::to_string(f.staged.codingMeta.k);
+    vj->["sg_f"] = std::to_string(f.staged.codingMeta.f);
+    vj->["sg_maxCS"] = std::to_string(f.staged.codingMeta.maxChunkSize);
+    vj->["sg_mtime"] = std::to_string(f.staged.mtime);
+    vj->["dm"] = std::to_string(deleted);
+    vj->["numUB"] = std::to_string(numUniqueBlocks);
+    vj->["numDB"] = std::to_string(numDuplicateBlocks);
 
+    // container ids
+    char chunkName[MAX_KEY_SIZE];
+    for (int i = 0; i < f.numChunks; i++)
+    {
+        genChunkKeyPrefix(f.chunks[i].getChunkId(), chunkName);
+        std::string cidKey = std::string(chunkName) + std::string("-cid");
+        vj->[cidKey.c_str()] = std::to_string(f.containerIds[i]);
+        std::string csizeKey = std::string(chunkName) + std::string("-size");
+        vj->[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
+        std::string cmd5Key = std::string(chunkName) + std::string("-md5");
+        vj->[cmd5Key.c_str()] = std::string(f.chunks[i].md5, f.chunks[i].md5 + MD5_DIGEST_LENGTH);
+        std::string cmd5Bad = std::string(chunkName) + std::string("-bad");
+        vj->[cmd5Bad.c_str()] = std::to_string((f.chunksCorrupted ? f.chunksCorrupted[i] : 0));
+    }
+
+    // deduplication fingerprints and block mapping
+    char blockName[MAX_KEY_SIZE];
+    size_t blockId = 0;
+    for (auto it = f.uniqueBlocks.begin(); it != f.uniqueBlocks.end(); it++, blockId++)
+    { // deduplication fingerprints
+        genBlockKey(blockId, blockName, /* is unique */ true);
+        std::string fp = it->second.first.get();
+        // logical offset, length, fingerprint, physical offset
+        vj->[std::string(blockName).c_str()] = std::to_string(&it->first._offset) + std::to_string(&it->first._length) + fp.data() + std::to_string(it->second.second);
+    }
+    blockId = 0;
+    for (auto it = f.duplicateBlocks.begin(); it != f.duplicateBlocks.end(); it++, blockId++)
+    {
+        genBlockKey(blockId, blockName, /* is unique */ false);
+        std::string fp = it->second.get();
+        // logical offset, length, fingerprint
+        vj->[std::string(blockName).c_str()] = std::to_string(&it->first._offset) + std::to_string(&it->first._length) + fp.data();
+    }
+
+    char fidKey[MAX_KEY_SIZE + 64];
+    int setKey = 0;
+
+    // add uuid-to-file-name maping
+    if (genFileUuidKey(f.namespaceId, f.uuid, fidKey) == false)
+    {
+        LOG(WARNING) << "File uuid " << boost::uuids::to_string(f.uuid) << " is too long to generate a reverse key mapping";
+    }
+    else
+    {
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fidKey), MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), value.size());
+        setKey += 1;
+    }
+
+    // set key
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
 
     FDBFuture *fset = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(fset));
 
     fdb_future_destroy(fset);
+
+    // TODO:
+    // update the corresponding directory prefix set of this file
+    // redisAppendCommand(
+    //     _cxt, "SADD %s %b", prefix.c_str(), filename, (size_t)nameLength);
+    // // update global directory list
+    // redisAppendCommand(
+    //     _cxt, "SADD %s %s", DIR_LIST_KEY, prefix.c_str());
+    // setKey += 2;
 
     LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
 
