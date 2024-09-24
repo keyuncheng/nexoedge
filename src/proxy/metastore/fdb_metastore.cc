@@ -63,27 +63,68 @@ FDBMetaStore::~FDBMetaStore()
 bool FDBMetaStore::putMeta(const File &f)
 {
     std::lock_guard<std::mutex> lk(_lock);
-    char fileKey[PATH_MAX];
+    char fileKey[PATH_MAX], verFileKey[PATH_MAX], verListName[PATH_MAX];
 
     // file key (format: namespace_filename)
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
+    // file version key
+    int versionListNameLength = 0;
     // file prefix
     std::string filePrefix = getFilePrefix(fileKey);
-
     // TODO: find current version of the file, and perform updates accordingly
     int curFileVersion = -1;
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // find the current version of the file (without version)
+    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0); // not set snapshot
+    exitOnError(fdb_future_block_until_ready(fileMetaFut));
+
+    // check whether key presents
+    fdb_bool_t fileMetaExist;
+    const uint8_t *fileMetaRaw = NULL;
+    int fileMetaRawLength;
+    exitOnError(fdb_future_get_value(fileMetaFut, &fileMetaExist, &fileMetaRaw, &fileMetaRawLength));
+    fdb_future_destroy(fileMetaFut);
+    fileMetaFut = nullptr;
+
+    if (fileMetaExist)
+    {
+        std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
+        nlohmann::json *verReplyJ = new nlohmann::json();
+        try
+        {
+            verReplyJ = nlohmann::json::parse(filMetaRawStr);
+        }
+        catch (std::exception e)
+        {
+            LOG(ERROR) << "FDBMetaStore::putMeta() Error parsing JSON string: " << e.what();
+            exit(1);
+        }
+        std::vector<int> verList = (*verReplyJ)["verList"].get<std::vector<int>>();
+        curFileVersion = verList.back();
+    }
+
+    // if versioning is enabled and the input version is newer than the
+    // current one, backup the previous version
+    Config &config = Config::getInstance();
+    bool enabledVers = !config.overwriteFiles();
+    if (enabledVers && curFileVersion != -1 && f.version > curFileVersion)
+    {
+        int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, curFileVersion, verFileKey);
+
+        // TODO: do I need to do this?
+    }
 
     // set metadata for the file<curFileVersion>, format: serialized JSON
     // string
     bool isEmptyFile = f.size == 0;
     unsigned char *codingState = isEmptyFile || f.codingMeta.codingState == NULL ? (unsigned char *)"" : f.codingMeta.codingState;
     int deleted = isEmptyFile ? f.isDeleted : 0;
-    size_t numUniqueBlocks = ;
+    size_t numUniqueBlocks = f.uniqueBlocks.size();
     size_t numDuplicateBlocks = f.duplicateBlocks.size();
-
-    // create transaction
-    FDBTransaction *tx;
-    exitOnError(fdb_database_create_transaction(_db, &tx));
 
     // key: filename, value: JSON obj string
     nlohmann::json *j = new nlohmann::json();
@@ -408,6 +449,10 @@ void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
 int FDBMetaStore::genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[])
 {
     return snprintf(key, PATH_MAX, "%d_%*s", namespaceId, nameLength, name);
+}
+
+int FDBMetaStore::genVersionedFileKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]) {
+    return snprintf(key, PATH_MAX, "/%d_%*s\n%d", namespaceId, nameLength, name, version);
 }
 
 int FDBMetaStore::genFileVersionListKey(unsigned char namespaceId, const char *name, int nameLength, char key[])

@@ -185,6 +185,8 @@ private:
 
     // helper functions (mostly copied from RedisMetaStore)
     int genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
+    int genVersionedFileKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]);
+    int genFileVersionListKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
     std::string getFilePrefix(const char name[], bool noEndingSlash = false);
 };
 
