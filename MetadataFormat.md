@@ -10,6 +10,11 @@
     * getFilePrefix(filename) ->
         * Directory: "//pf_(dirname)"
         * File: "//pf_(everything-before-slash)"
+    * FileKey
+        * without versioning: through genFileKey()
+        * with versioning
+            * the latest one: through genFileKey()
+            * Previous versions: through genVersionedFileKeys()
 
 
 ## Redis putMeta() workflow
@@ -30,3 +35,15 @@
             * Bind with containers: Check redis_metastore.cc:213-219
             * Bind with deduplication: Check redis_metastore.cc:221-242
         * Update other metadata (uuid, previx, dir): Check redis_metastore.cc:247-264
+
+# FDB
+
+* Filename (assume filename is "abc")
+    * genFileKey(File) -> filename = "namespaceId_abc"
+    * getFilePrefix(filename) ->
+        * Directory: "//pf_(dirname)"
+        * File: "//pf_(everything-before-slash)"
+    * FileKey
+        * wi/wo versioning: through genFileKey()
+        * Without versioning: only keep the latest version (through genVersFileKeys())
+        * With versioning: keep all versions (through genVersFileKeys())
