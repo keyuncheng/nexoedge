@@ -77,11 +77,9 @@ bool FDBMetaStore::putMeta(const File &f)
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
-    // check if the current file metadata exists
+    // check whether the file metadata exists
     FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0); // not set snapshot
     exitOnError(fdb_future_block_until_ready(fileMetaFut));
-
-    // check whether the file metadata exists
     fdb_bool_t fileMetaExist;
     const uint8_t *fileMetaRaw = NULL;
     int fileMetaRawLength;
@@ -89,8 +87,8 @@ bool FDBMetaStore::putMeta(const File &f)
     fdb_future_destroy(fileMetaFut);
     fileMetaFut = nullptr;
 
-    // insert file metadata (key: filename; value: {"verList": [v1, v2, ...]})
-    // for versioned system, verList only stores one element
+    // if not exist, insert file metadata (key: filename; value: {"verList": [v1, v2, ...]})
+    // for versioned system, verList only stores (version 0)
     if (fileMetaExist == false)
     {
         // key: filename, value: JSON obj string
@@ -103,13 +101,13 @@ bool FDBMetaStore::putMeta(const File &f)
         std::string jstr = j.dump();
         delete jptr;
 
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey.c_str()), fileKey.size(), reinterpret_cast<const uint8_t *>(jstr.c_str()), jstr.size());
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(jstr.c_str()), jstr.size());
     }
 
-    // create file metadata for current version, format: serialized JSON string
+    // create metadata for current file version, format: serialized JSON string
     bool isEmptyFile = f.size == 0;
-    unsigned char *codingState = isEmptyFile || f.codingMeta.codingState == NULL? (unsigned char *) "" : f.codingMeta.codingState;
-    int deleted = isEmptyFile? f.isDeleted : 0;
+    unsigned char *codingState = isEmptyFile || f.codingMeta.codingState == NULL ? (unsigned char *)"" : f.codingMeta.codingState;
+    int deleted = isEmptyFile ? f.isDeleted : 0;
     size_t numUniqueBlocks = f.uniqueBlocks.size();
     size_t numDuplicateBlocks = f.duplicateBlocks.size();
 
@@ -120,14 +118,14 @@ bool FDBMetaStore::putMeta(const File &f)
     vj["size"] = std::to_string(f.size);
     vj["numC"] = std::to_string(f.numChunks);
     vj["sc"] = f.storageClass;
-    vj["cs"] = std::string(f.codingMeta.coding);
+    vj["cs"] = std::string(1, f.codingMeta.coding);
     vj["n"] = std::to_string(f.codingMeta.n);
     vj["k"] = std::to_string(f.codingMeta.k);
     vj["f"] = std::to_string(f.codingMeta.f);
     vj["maxCS"] = std::to_string(f.codingMeta.maxChunkSize);
     vj["codingStateS"] = std::to_string(f.codingMeta.codingStateSize);
-    vj["codingState"] = std::string(codingState);
-    vj["numS"] = std::string(f.numStripes);
+    vj["codingState"] = std::string(reinterpret_cast<char *>(codingState));
+    vj["numS"] = std::to_string(f.numStripes);
     vj["ver"] = std::to_string(f.version);
     vj["ctime"] = std::to_string(f.ctime);
     vj["atime"] = std::to_string(f.atime);
@@ -147,7 +145,7 @@ bool FDBMetaStore::putMeta(const File &f)
     vj["numDB"] = std::to_string(numDuplicateBlocks);
 
     // container ids
-    char chunkName[MAX_KEY_SIZE];
+    char chunkName[FDB_MAX_KEY_SIZE];
     for (int i = 0; i < f.numChunks; i++)
     {
         genChunkKeyPrefix(f.chunks[i].getChunkId(), chunkName);
@@ -162,14 +160,14 @@ bool FDBMetaStore::putMeta(const File &f)
     }
 
     // deduplication fingerprints and block mapping
-    char blockName[MAX_KEY_SIZE];
+    char blockName[FDB_MAX_KEY_SIZE];
     size_t blockId = 0;
     for (auto it = f.uniqueBlocks.begin(); it != f.uniqueBlocks.end(); it++, blockId++)
     { // deduplication fingerprints
         genBlockKey(blockId, blockName, /* is unique */ true);
         std::string fp = it->second.first.get();
         // logical offset, length, fingerprint, physical offset
-        vj[std::string(blockName).c_str()] = std::to_string(&it->first._offset) + std::to_string(&it->first._length) + fp.data() + std::to_string(it->second.second);
+        vj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data() + std::to_string(it->second.second);
     }
     blockId = 0;
     for (auto it = f.duplicateBlocks.begin(); it != f.duplicateBlocks.end(); it++, blockId++)
@@ -177,10 +175,10 @@ bool FDBMetaStore::putMeta(const File &f)
         genBlockKey(blockId, blockName, /* is unique */ false);
         std::string fp = it->second.get();
         // logical offset, length, fingerprint
-        vj[std::string(blockName).c_str()] = std::to_string(&it->first._offset) + std::to_string(&it->first._length) + fp.data();
+        vj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
     }
 
-    char fidKey[MAX_KEY_SIZE + 64];
+    char fidKey[FDB_MAX_KEY_SIZE + 64];
     int setKey = 0;
 
     // add uuid-to-file-name maping
@@ -190,21 +188,39 @@ bool FDBMetaStore::putMeta(const File &f)
     }
     else
     {
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fidKey), MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), value.size());
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fidKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), f.name.size());
         setKey += 1;
     }
 
-    // set key
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
+    // update the corresponding directory prefix set of this file
+    std::string filePrefix = getFilePrefix(fileKey);
+    FDBFuture *filePrefixFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), 0); // not set snapshot
+    exitOnError(fdb_future_block_until_ready(filePrefixFut));
+    fdb_bool_t filePrefixExist;
+    const uint8_t *filePrefixRaw = NULL;
+    int filePrefixRawLength;
+    exitOnError(fdb_future_get_value(filePrefixFut, &filePrefixExist, &filePrefixRaw, &filePrefixRawLength));
+    fdb_future_destroy(fileMetaFut);
+    fileMetaFut = nullptr;
+    if (!filePrefixExist)
+    {
+        // create the list and add to the list
+        nlohmann::json *ljptr = new nlohmann::json();
+        auto &lj = lvjptr;
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
+    }
+    else
+    {
+        // add to the list (avoid duplication)
+    }
+
+    // update the corresponding directory prefix set of this file
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
 
     FDBFuture *fset = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(fset));
 
     fdb_future_destroy(fset);
-
-    
-    // file prefix
-    std::string filePrefix = getFilePrefix(fileKey);
 
     // handle versioning issues
     // std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
@@ -472,6 +488,11 @@ int FDBMetaStore::genFileVersionListKey(unsigned char namespaceId, const char *n
     return snprintf(key, PATH_MAX, "//vl%d_%*s", namespaceId, nameLength, name);
 }
 
+bool FDBMetaStore::genFileUuidKey(unsigned char namespaceId, boost::uuids::uuid uuid, char key[])
+{
+    return snprintf(key, FDB_MAX_KEY_SIZE + 64, "//fu%d-%s", namespaceId, boost::uuids::to_string(uuid).c_str()) <= FDB_MAX_KEY_SIZE;
+}
+
 std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
 {
     const char *slash = strrchr(name, '/'), *us = strchr(name, '_');
@@ -484,6 +505,21 @@ std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
     }
     // sub-directory
     return prefix.append(name, slash - name);
+}
+
+int FDBMetaStore::genChunkKeyPrefix(int chunkId, char prefix[])
+{
+    return snprintf(prefix, FDB_MAX_KEY_SIZE, "c%d", chunkId);
+}
+
+int FDBMetaStore::genBlockKey(int blockId, char prefix[], bool unique)
+{
+    return snprintf(prefix, FDB_MAX_KEY_SIZE, "%s%d", getBlockKeyPrefix(unique), blockId);
+}
+
+const char *FDBMetaStore::getBlockKeyPrefix(bool unique)
+{
+    return unique ? "ub" : "db";
 }
 
 std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char *field, size_t fieldLength)

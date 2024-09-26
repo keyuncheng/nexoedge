@@ -181,13 +181,18 @@ private:
     static void *runNetwork(void *args);
     FDBDatabase *getDatabase(std::string clusterFile);
     std::pair<bool, std::string> getValue(std::string key);
-    void setValueAndCommit(std::string key, std::string value);
+    void setValueAndCommit(std::sgetring key, std::string value);
 
     // helper functions (mostly copied from RedisMetaStore)
     int genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
     int genVersionedFileKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]);
     int genFileVersionListKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
+    bool genFileUuidKey(unsigned char  namespaceId, boost::uuids::uuid uuid, char key[]);
     std::string getFilePrefix(const char name[], bool noEndingSlash = false);
+    int genChunkKeyPrefix(int chunkId, char prefix[]);
+    const char *getBlockKeyPrefix(bool unique);
+    int genBlockKey(int blockId, char prefix[], bool unqiue);
+
 };
 
 #endif // define __FDB_METASTORE_HH__
