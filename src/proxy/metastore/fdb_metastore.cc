@@ -178,18 +178,15 @@ bool FDBMetaStore::putMeta(const File &f)
         vj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
     }
 
-    char fidKey[FDB_MAX_KEY_SIZE + 64];
-    int setKey = 0;
-
     // add uuid-to-file-name maping
+    char fidKey[FDB_MAX_KEY_SIZE + 64];
     if (genFileUuidKey(f.namespaceId, f.uuid, fidKey) == false)
     {
         LOG(WARNING) << "File uuid " << boost::uuids::to_string(f.uuid) << " is too long to generate a reverse key mapping";
     }
     else
     {
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fidKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), f.name.size());
-        setKey += 1;
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fidKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), f.nameLength);
     }
 
     // update the corresponding directory prefix set of this file
@@ -205,17 +202,69 @@ bool FDBMetaStore::putMeta(const File &f)
     if (!filePrefixExist)
     {
         // create the list and add to the list
-        nlohmann::json *ljptr = new nlohmann::json();
-        auto &lj = lvjptr;
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
+        nlohmann::json *dljptr = new nlohmann::json();
+        auto &dlj = *dljptr;
+        dlj["list"] = nlohmann::json::array();
+        dlj["list"].push_back(fileKey);
+        std::string dljstr = dlj.dump();
+        delete dljptr;
+
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(dljstr.c_str()), dljstr.size());
     }
     else
     {
-        // add to the list (avoid duplication)
+        std::string dljstr(reinterpret_cast<const char *>(filePrefixRaw), filePrefixRawLength);
+        // add fileKey to the list (avoid duplication)
+        nlohmann::json *dljptr = new nlohmann::json();
+        auto &dlj = *dljptr;
+        dlj.parse(dljstr);
+        if (dlj["list"].find(fileKey) == dlj["list"].end())
+        {
+            dlj["list"].push_back(fileKey);
+        }
+        std::string dljstr = dlj.dump();
+        delete dljptr;
+
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(dljstr.c_str()), dljstr.size());
     }
 
-    // update the corresponding directory prefix set of this file
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
+    // update the global directory prefix set of this file
+    FDBFuture *GDLFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), 0); // not set snapshot
+    exitOnError(fdb_future_block_until_ready(GDLFut));
+    fdb_bool_t GDLExist;
+    const uint8_t *GDLRaw = NULL;
+    int GDLRawLength;
+    exitOnError(fdb_future_get_value(GDLFut, &GDLExist, &GDLRaw, &GDLRawLength));
+    fdb_future_destroy(GDLFut);
+    fileMetaFut = nullptr;
+    if (!GDLExist)
+    {
+        // create the list and add filePrefix to the list
+        nlohmann::json *gdljptr = new nlohmann::json();
+        auto &gdlj = *gdljptr;
+        gdlj["list"] = nlohmann::json::array();
+        gdlj["list"].push_back(filePrefix.c_str());
+        std::string gdljstr = gdlj.dump();
+        delete gdljptr;
+
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(gdljstr.c_str()), gdljstr.size());
+    }
+    else
+    {
+        std::string gdljstr(reinterpret_cast<const char *>(GDLRaw), GDLRawLength);
+        // add filePrefix to the list (avoid duplication)
+        nlohmann::json *gdljptr = new nlohmann::json();
+        auto &gdlj = *gdljptr;
+        gdlj.parse(gdljstr);
+        if (gdlj["list"].find(filePrefix) == gdlj["list"].end())
+        {
+            gdlj["list"].push_back(filePrefix);
+        }
+        std::string gdljstr = gdlj.dump();
+        delete gdljptr;
+
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(gdljstr.c_str()), gdljstr.size());
+    }
 
     FDBFuture *fset = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(fset));
