@@ -271,7 +271,7 @@ bool FDBMetaStore::putMeta(const File &f)
 
     fdb_future_destroy(fset);
 
-    // handle versioning issues
+    // handle JSON parsing error (TODO)
     // std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
     // nlohmann::json *verReplyJ = new nlohmann::json();
     // try
@@ -285,26 +285,6 @@ bool FDBMetaStore::putMeta(const File &f)
     // }
     // std::vector<int> verList = (*verReplyJ)["verList"].get<std::vector<int>>();
     // curFileVersion = verList.back();
-
-    // if versioning is enabled and the input version is newer than the
-    // current one, backup the previous version
-    Config &config = Config::getInstance();
-    bool enabledVers = !config.overwriteFiles();
-    if (enabledVers && curFileVersion != -1 && f.version > curFileVersion)
-    {
-        int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, curFileVersion, verFileKey);
-
-        // TODO: do I need to do this?
-    }
-
-    // TODO:
-    // update the corresponding directory prefix set of this file
-    // redisAppendCommand(
-    //     _cxt, "SADD %s %b", prefix.c_str(), filename, (size_t)nameLength);
-    // // update global directory list
-    // redisAppendCommand(
-    //     _cxt, "SADD %s %s", DIR_LIST_KEY, prefix.c_str());
-    // setKey += 2;
 
     LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
 
