@@ -87,22 +87,59 @@ bool FDBMetaStore::putMeta(const File &f)
     fdb_future_destroy(fileMetaFut);
     fileMetaFut = nullptr;
 
-    // if not exist, insert file metadata (key: filename; value: {"verList": [v1, v2, ...]})
-    // for versioned system, verList only stores (version 0)
+    // current format: key: filename; value: {"verList": [v1, v2, ...]}
+    // for non-versioned system, verList only stores version 0
+    nlohmann::json *fmjptr = new nlohmann::json();
+    auto &fmj = *fmjptr;
     if (fileMetaExist == false)
     {
-        // key: filename, value: JSON obj string
-        nlohmann::json *jptr = new nlohmann::json();
-        auto &j = *jptr;
-        // add the current file version
-        j["verList"] = nlohmann::json::array();
-        j["verList"].push_back(verFileKey);
-        // serialize the json
-        std::string jstr = j.dump();
-        delete jptr;
-
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(jstr.c_str()), jstr.size());
+        // init the version list
+        fmj["verList"] = nlohmann::json::array();
+        // insert the new version into the version list
+        fmj["verList"].push_back(verFileKey);
     }
+    else
+    {
+        // parse fileMeta as JSON object
+        try
+        {
+            std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
+            fmj = nlohmann::json::parse(filMetaRawStr);
+        }
+        catch (std::exception e)
+        {
+            LOG(ERROR) << "FDBMetaStore::putMeta() Error parsing JSON string: " << e.what();
+            exit(1);
+        }
+
+        // check if versioning is enabled
+        bool keepVersion = !config.overwriteFiles();
+        if (keepVersion == false)
+        {
+            // TODO: remove all previous versions (verFilekey) in FDB
+            for (auto prevVerFileKey : fmj["verList"])
+            {
+                // fdb_delete
+            }
+
+            // only keep the latest version
+            fmj["verList"].clear();
+            fmj["verList"].push_back(verFileKey);
+        }
+        else
+        {
+            // if the version is not stored in the list, append the version
+            if (fmj["verList"].find(verFileKey) == fmj["verList"].end())
+            {
+                fmj["verList"].push_back(verFileKey);
+            }
+        }
+    }
+
+    // serialize json to string and store in FDB
+    std::string fmjStr = fmj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
+    delete fmjptr;
 
     // create metadata for current file version, format: serialized JSON string
     bool isEmptyFile = f.size == 0;
@@ -111,38 +148,38 @@ bool FDBMetaStore::putMeta(const File &f)
     size_t numUniqueBlocks = f.uniqueBlocks.size();
     size_t numDuplicateBlocks = f.duplicateBlocks.size();
 
-    nlohmann::json *vjptr = new nlohmann::json();
-    auto &vj = *vjptr;
-    vj["name"] = std::string(f.name, f.name + f.nameLength);
-    vj["uuid"] = boost::uuids::to_string(f.uuid);
-    vj["size"] = std::to_string(f.size);
-    vj["numC"] = std::to_string(f.numChunks);
-    vj["sc"] = f.storageClass;
-    vj["cs"] = std::string(1, f.codingMeta.coding);
-    vj["n"] = std::to_string(f.codingMeta.n);
-    vj["k"] = std::to_string(f.codingMeta.k);
-    vj["f"] = std::to_string(f.codingMeta.f);
-    vj["maxCS"] = std::to_string(f.codingMeta.maxChunkSize);
-    vj["codingStateS"] = std::to_string(f.codingMeta.codingStateSize);
-    vj["codingState"] = std::string(reinterpret_cast<char *>(codingState));
-    vj["numS"] = std::to_string(f.numStripes);
-    vj["ver"] = std::to_string(f.version);
-    vj["ctime"] = std::to_string(f.ctime);
-    vj["atime"] = std::to_string(f.atime);
-    vj["mtime"] = std::to_string(f.mtime);
-    vj["tctime"] = std::to_string(f.tctime);
-    vj["md5"] = std::string(f.md5, f.md5 + MD5_DIGEST_LENGTH);
-    vj["sg_size"] = std::to_string(f.staged.size);
-    vj["sg_sc"] = f.staged.storageClass;
-    vj["sg_cs"] = std::to_string(f.staged.codingMeta.coding);
-    vj["sg_n"] = std::to_string(f.staged.codingMeta.n);
-    vj["sg_k"] = std::to_string(f.staged.codingMeta.k);
-    vj["sg_f"] = std::to_string(f.staged.codingMeta.f);
-    vj["sg_maxCS"] = std::to_string(f.staged.codingMeta.maxChunkSize);
-    vj["sg_mtime"] = std::to_string(f.staged.mtime);
-    vj["dm"] = std::to_string(deleted);
-    vj["numUB"] = std::to_string(numUniqueBlocks);
-    vj["numDB"] = std::to_string(numDuplicateBlocks);
+    nlohmann::json *vfmjptr = new nlohmann::json();
+    auto &vfmj = *vfmjptr;
+    vfmj["name"] = std::string(f.name, f.name + f.nameLength);
+    vfmj["uuid"] = boost::uuids::to_string(f.uuid);
+    vfmj["size"] = std::to_string(f.size);
+    vfmj["numC"] = std::to_string(f.numChunks);
+    vfmj["sc"] = f.storageClass;
+    vfmj["cs"] = std::string(1, f.codingMeta.coding);
+    vfmj["n"] = std::to_string(f.codingMeta.n);
+    vfmj["k"] = std::to_string(f.codingMeta.k);
+    vfmj["f"] = std::to_string(f.codingMeta.f);
+    vfmj["maxCS"] = std::to_string(f.codingMeta.maxChunkSize);
+    vfmj["codingStateS"] = std::to_string(f.codingMeta.codingStateSize);
+    vfmj["codingState"] = std::string(reinterpret_cast<char *>(codingState));
+    vfmj["numS"] = std::to_string(f.numStripes);
+    vfmj["ver"] = std::to_string(f.version);
+    vfmj["ctime"] = std::to_string(f.ctime);
+    vfmj["atime"] = std::to_string(f.atime);
+    vfmj["mtime"] = std::to_string(f.mtime);
+    vfmj["tctime"] = std::to_string(f.tctime);
+    vfmj["md5"] = std::string(f.md5, f.md5 + MD5_DIGEST_LENGTH);
+    vfmj["sg_size"] = std::to_string(f.staged.size);
+    vfmj["sg_sc"] = f.staged.storageClass;
+    vfmj["sg_cs"] = std::to_string(f.staged.codingMeta.coding);
+    vfmj["sg_n"] = std::to_string(f.staged.codingMeta.n);
+    vfmj["sg_k"] = std::to_string(f.staged.codingMeta.k);
+    vfmj["sg_f"] = std::to_string(f.staged.codingMeta.f);
+    vfmj["sg_maxCS"] = std::to_string(f.staged.codingMeta.maxChunkSize);
+    vfmj["sg_mtime"] = std::to_string(f.staged.mtime);
+    vfmj["dm"] = std::to_string(deleted);
+    vfmj["numUB"] = std::to_string(numUniqueBlocks);
+    vfmj["numDB"] = std::to_string(numDuplicateBlocks);
 
     // container ids
     char chunkName[FDB_MAX_KEY_SIZE];
@@ -150,13 +187,13 @@ bool FDBMetaStore::putMeta(const File &f)
     {
         genChunkKeyPrefix(f.chunks[i].getChunkId(), chunkName);
         std::string cidKey = std::string(chunkName) + std::string("-cid");
-        vj[cidKey.c_str()] = std::to_string(f.containerIds[i]);
+        vfmj[cidKey.c_str()] = std::to_string(f.containerIds[i]);
         std::string csizeKey = std::string(chunkName) + std::string("-size");
-        vj[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
+        vfmj[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
         std::string cmd5Key = std::string(chunkName) + std::string("-md5");
-        vj[cmd5Key.c_str()] = std::string(f.chunks[i].md5, f.chunks[i].md5 + MD5_DIGEST_LENGTH);
+        vfmj[cmd5Key.c_str()] = std::string(f.chunks[i].md5, f.chunks[i].md5 + MD5_DIGEST_LENGTH);
         std::string cmd5Bad = std::string(chunkName) + std::string("-bad");
-        vj[cmd5Bad.c_str()] = std::to_string((f.chunksCorrupted ? f.chunksCorrupted[i] : 0));
+        vfmj[cmd5Bad.c_str()] = std::to_string((f.chunksCorrupted ? f.chunksCorrupted[i] : 0));
     }
 
     // deduplication fingerprints and block mapping
@@ -167,7 +204,7 @@ bool FDBMetaStore::putMeta(const File &f)
         genBlockKey(blockId, blockName, /* is unique */ true);
         std::string fp = it->second.first.get();
         // logical offset, length, fingerprint, physical offset
-        vj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data() + std::to_string(it->second.second);
+        vfmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data() + std::to_string(it->second.second);
     }
     blockId = 0;
     for (auto it = f.duplicateBlocks.begin(); it != f.duplicateBlocks.end(); it++, blockId++)
@@ -175,8 +212,13 @@ bool FDBMetaStore::putMeta(const File &f)
         genBlockKey(blockId, blockName, /* is unique */ false);
         std::string fp = it->second.get();
         // logical offset, length, fingerprint
-        vj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
+        vfmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
     }
+
+    // serialize json to string and store in FDB
+    std::string vfmjStr = vfmj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
+    delete vfmjptr;
 
     // add uuid-to-file-name maping
     char fidKey[FDB_MAX_KEY_SIZE + 64];
@@ -266,27 +308,13 @@ bool FDBMetaStore::putMeta(const File &f)
         fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(gdljstr.c_str()), gdljstr.size());
     }
 
-    FDBFuture *fset = fdb_transaction_commit(tx);
-    exitOnError(fdb_future_block_until_ready(fset));
+    // commit transaction
+    FDBFuture *fcmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(fcmt));
 
-    fdb_future_destroy(fset);
+    fdb_future_destroy(fcmt);
 
-    // handle JSON parsing error (TODO)
-    // std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
-    // nlohmann::json *verReplyJ = new nlohmann::json();
-    // try
-    // {
-    //     verReplyJ = nlohmann::json::parse(filMetaRawStr);
-    // }
-    // catch (std::exception e)
-    // {
-    //     LOG(ERROR) << "FDBMetaStore::putMeta() Error parsing JSON string: " << e.what();
-    //     exit(1);
-    // }
-    // std::vector<int> verList = (*verReplyJ)["verList"].get<std::vector<int>>();
-    // curFileVersion = verList.back();
-
-    LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
+    LOG(INFO) << "FDBMetaStore:: putMeta() finished updating all metadata operation";
 
     return true;
 }
