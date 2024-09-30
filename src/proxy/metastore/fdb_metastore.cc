@@ -69,16 +69,15 @@ bool FDBMetaStore::putMeta(const File &f)
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
     // versioned file key (format: namespace_filename_version)
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
-    // version list (format: vlnamespace_filename) (TODO: decide whether to
-    // keep it)
-    int vlnameLength = genFileVersionListKey(f.namespaceId, f.name, f.nameLength, verListKey);
+    // // version list (format: vlnamespace_filename) (currently removed)
+    // int vlnameLength = genFileVersionListKey(f.namespaceId, f.name, f.nameLength, verListKey);
 
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
     // check whether the file metadata exists
-    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0); // not set snapshot
+    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0 /** not set snapshot */);
     exitOnError(fdb_future_block_until_ready(fileMetaFut));
     fdb_bool_t fileMetaExist;
     const uint8_t *fileMetaRaw = NULL;
@@ -87,16 +86,28 @@ bool FDBMetaStore::putMeta(const File &f)
     fdb_future_destroy(fileMetaFut);
     fileMetaFut = nullptr;
 
-    // current format: key: filename; value: {"verList": [v1, v2, ...]}
-    // for non-versioned system, verList only stores version 0
+    // current metadata format: key: filename; value: {"verList": [v0, v1, v2,
+    // ...]}; for non-versioned system, verList only stores v0
     nlohmann::json *fmjptr = new nlohmann::json();
     auto &fmj = *fmjptr;
+
+    // create a file version summary
+    std::string fvsummary;
+    fvsummary.append(std::to_string(f.size).append(" "));                            // file size
+    fvsummary.append(std::to_string(f.mtime).append(" "));                           // modify time
+    fvsummary.append(std::string(f.md5, f.md5 + MD5_DIGEST_LENGTH).append(" "));     // md5
+    fvsummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" ")); // is deleted
+    fvsummary.append(std::to_string(f.numChunks));                                   // number of chunks
+
     if (fileMetaExist == false)
     {
-        // init the version list
+        // init the version list with the new version
         fmj["verList"] = nlohmann::json::array();
-        // insert the new version into the version list
         fmj["verList"].push_back(verFileKey);
+        fmj["verNum"] = nlohmann::json::array();
+        fmj["verNum"].push_back(f.version);
+        fmj["verSummary"] = nlohmann::json::array();
+        fmj["verSummary"].push_back(fvsummary);
     }
     else
     {
@@ -116,22 +127,43 @@ bool FDBMetaStore::putMeta(const File &f)
         bool keepVersion = !config.overwriteFiles();
         if (keepVersion == false)
         {
-            // TODO: remove all previous versions (verFilekey) in FDB
+            // remove all previous versions (verFilekey) in FDB
             for (auto prevVerFileKey : fmj["verList"])
             {
-                // fdb_delete
+                fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(prevVerFileKey.c_str()));
             }
 
             // only keep the latest version
             fmj["verList"].clear();
             fmj["verList"].push_back(verFileKey);
+            fmj["verNum"].clear();
+            fmj["verNum"].push_back(f.version);
+            fmj["verSummary"].clear();
+            fmj["verSummary"].push_back(fvsummary);
         }
         else
         {
-            // if the version is not stored in the list, append the version
+            // if the version is not stored in the list, insert the version
             if (fmj["verList"].find(verFileKey) == fmj["verList"].end())
             {
-                fmj["verList"].push_back(verFileKey);
+                bool found_pos = false;
+                for (int i = 0; i < fmj["verNum"].size(); i++)
+                {
+                    if (f.version < fmj["verNum"].get<int>(i))
+                    {
+                        found_pos = true;
+                        fmj["verList"].insert(fmj["verList"].begin() + i, verFileKey);
+                        fmj["verNum"].insert(fmj["verNum"].begin() + i, f.version);
+                        fmj["verSummary"].insert(fmj["verSummary"].begin() + i, fvsummary);
+                        break;
+                    }
+                }
+                if (found_pos == false)
+                {
+                    fmj["verList"].push_back(verFileKey);
+                    fmj["verNum"].push_back(f.version);
+                    fmj["verSummary"].push_back(fvsummary);
+                }
             }
         }
     }
