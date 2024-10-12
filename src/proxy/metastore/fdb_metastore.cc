@@ -581,6 +581,12 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         }
     }
 
+    // commit transaction and return
+    delete vfmjptr;
+    FDBFuture *fcmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(fcmt));
+    fdb_future_destroy(fcmt);
+
     return true;
 }
 
