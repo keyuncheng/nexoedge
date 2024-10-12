@@ -72,6 +72,14 @@ bool FDBMetaStore::putMeta(const File &f)
     // // version list (format: vlnamespace_filename) (currently removed)
     // int vlnameLength = genFileVersionListKey(f.namespaceId, f.name, f.nameLength, verListKey);
 
+    // pre-create a file version summary
+    std::string fvsummary;
+    fvsummary.append(std::to_string(f.size).append(" "));                            // file size
+    fvsummary.append(std::to_string(f.mtime).append(" "));                           // modify time
+    fvsummary.append(std::string(f.md5, f.md5 + MD5_DIGEST_LENGTH).append(" "));     // md5
+    fvsummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" ")); // is deleted
+    fvsummary.append(std::to_string(f.numChunks));                                   // number of chunks
+
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
@@ -90,14 +98,6 @@ bool FDBMetaStore::putMeta(const File &f)
     // ...]}; for non-versioned system, verList only stores v0
     nlohmann::json *fmjptr = new nlohmann::json();
     auto &fmj = *fmjptr;
-
-    // create a file version summary
-    std::string fvsummary;
-    fvsummary.append(std::to_string(f.size).append(" "));                            // file size
-    fvsummary.append(std::to_string(f.mtime).append(" "));                           // modify time
-    fvsummary.append(std::string(f.md5, f.md5 + MD5_DIGEST_LENGTH).append(" "));     // md5
-    fvsummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" ")); // is deleted
-    fvsummary.append(std::to_string(f.numChunks));                                   // number of chunks
 
     if (fileMetaExist == false)
     {
@@ -353,6 +353,234 @@ bool FDBMetaStore::putMeta(const File &f)
 
 bool FDBMetaStore::getMeta(File &f, int getBlocks)
 {
+    std::lock_guard<std::mutex> lk(_lock);
+    char fileKey[PATH_MAX];
+
+    // file key (format: namespace_filename)
+    int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
+    // versioned file key (format: namespace_filename_version)
+    int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // check whether the file metadata exists
+    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0 /** not set snapshot */);
+    exitOnError(fdb_future_block_until_ready(fileMetaFut));
+    fdb_bool_t fileMetaExist;
+    const uint8_t *fileMetaRaw = NULL;
+    int fileMetaRawLength;
+    exitOnError(fdb_future_get_value(fileMetaFut, &fileMetaExist, &fileMetaRaw, &fileMetaRawLength));
+    fdb_future_destroy(fileMetaFut);
+    fileMetaFut = nullptr;
+
+    nlohmann::json *fmjptr = new nlohmann::json();
+    auto &fmj = *fmjptr;
+
+    if (fileMetaExist == false)
+    { // file metadata not exist: report and return
+        LOG(WARNING) << "FDBMetaStore::putMeta() failed to get metadata for file " << f.name;
+
+        // commit transaction and return
+        delete fmjptr;
+        FDBFuture *fcmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(fcmt));
+        fdb_future_destroy(fcmt);
+
+        return false;
+    }
+    else
+    {
+        // parse fileMeta as JSON object
+        try
+        {
+            std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
+            fmj = nlohmann::json::parse(filMetaRawStr);
+        }
+        catch (std::exception e)
+        {
+            LOG(ERROR) << "FDBMetaStore::getMeta() Error parsing JSON string: " << e.what();
+            exit(1);
+        }
+    }
+
+    // For non-versioned file: get the only version; for versioned file: get
+    // metadata of f.version
+    if (f.version == -1)
+    { // non-versioned file
+        // update verFileKey as the only element in verList
+        memcpy(verFileKey, fmj["verList"][0].get<std::string>().c_str(), fmj["verList"][0].get<std::string>().size());
+    }
+    else
+    { // versioned file: make sure that the current version exists in the file metadata
+        if (fmj["verList"].find(verFileKey) == fmj["verList"].end())
+        {
+            LOG(WARNING) << "FDBMetaStore::getMeta() failed to find version " << f.version << " for file " << f.name;
+
+            // commit transaction and return
+            delete fmjptr;
+            FDBFuture *fcmt = fdb_transaction_commit(tx);
+            exitOnError(fdb_future_block_until_ready(fcmt));
+            fdb_future_destroy(fcmt);
+
+            return false;
+        }
+    }
+    delete fmjptr;
+
+    size_t numUniqueBlocks = 0, numDuplicateBlocks = 0;
+
+    // find metadata for current file version
+    FDBFuture *verFileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, 0 /** not set snapshot */);
+    exitOnError(fdb_future_block_until_ready(verFileMetaFut));
+    fdb_bool_t verFileMetaExist;
+    const uint8_t *verFileMetaRaw = NULL;
+    int verFileMetaRawLength;
+    exitOnError(fdb_future_get_value(verFileMetaFut, &verFileMetaExist, &verFileMetaRaw, &verFileMetaRawLength));
+    fdb_future_destroy(verFileMetaFut);
+    verFileMetaFut = nullptr;
+
+    nlohmann::json *vfmjptr = new nlohmann::json();
+    auto &vfmj = *vfmjptr;
+
+    if (verFileMetaExist == false)
+    { // versioned file metadata not exist: report and return
+        LOG(WARNING) << "FDBMetaStore::getMeta() failed to get versioned metadata for file " << f.name;
+
+        // commit transaction and return
+        delete vfmjptr;
+        FDBFuture *fcmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(fcmt));
+        fdb_future_destroy(fcmt);
+
+        return false;
+    }
+    else
+    {
+        // parse fileMeta as JSON object
+        try
+        {
+            std::string verFileMetaRawStr(reinterpret_cast<const char *>(verFileMetaRaw));
+            vfmj = nlohmann::json::parse(verFileMetaRawStr);
+        }
+        catch (std::exception e)
+        {
+            LOG(ERROR) << "FDBMetaStore::getMeta() Error parsing JSON string: " << e.what();
+            exit(1);
+        }
+    }
+    delete vfmjptr;
+
+    // parse fields
+    f.size = std::stoull(vfmj["size"].get<std::string>());
+    f.numChunks = std::stoi(vfmj["numC"].get<std::string>());
+    f.numStripes = std::stoi(vfmj["numS"].get<std::string>());
+    std::string retrievedUUID = vfmj["uuid"].get < std::string().c_str();
+    if (f.setUUID(retrievedUUID) == false)
+    {
+        LOG(WARNING) << "FDBMetaStore::getMeta() invalid UUID in metadata: " << retrievedUUID;
+
+        // commit transaction and return
+        delete vfmjptr;
+        FDBFuture *fcmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(fcmt));
+        fdb_future_destroy(fcmt);
+
+        return false;
+    }
+
+    f.storageClass = vfmj["sc"].get<std::string>().c_str();
+    f.codingMeta.coding = vfmj["cs"].get < std::string().c_str()[0];
+    f.codingMeta.n = std::stoi(vfmj["n"].get<std::string>());
+    f.codingMeta.k = std::stoi(vfmj["k"].get<std::string>());
+    f.codingMeta.f = std::stoi(vfmj["f"].get<std::string>());
+    f.codingMeta.maxChunkSize = std::stoi(vfmj["maxCS"].get<std::string>());
+    f.staged.mtime = std::stoull(vfmj["sg_mtime"].get<std::string>());
+    f.isDeleted = std::stoi(vfmj["dm"].get<std::string>());
+    f.numUniqueBlocks = std::stoi(vfmj["numUB"].get<std::string>());
+    f.numDuplicateBlocks = std::stoi(vfmj["numDB"].get<std::string>());
+
+    // get container ids and attributes
+    if (!f.initChunksAndContainerIds())
+    {
+        LOG(ERROR) << "FDBMetaStore::getMeta() Failed to allocate space for container ids";
+        return false;
+    }
+
+    char chunkName[FDB_MAX_KEY_SIZE];
+    for (int chunkId = 0; chunkId < f.numChunks; chunkId++)
+    {
+        genChunkKeyPrefix(chunkId, chunkName);
+        std::string cidKey = std::string(chunkName) + std::string("-cid");
+        std::string csizeKey = std::string(chunkName) + std::string("-size");
+        std::string cmd5Key = std::string(chunkName) + std::string("-md5");
+        std::string cbadKey = std::string(chunkName) + std::string("-bad");
+
+        f.containerIds[chunkId] = std::stoi(vfmj[cidKey.c_str()].get<std::string>());
+        f.chunks[chunkId].size = std::stoi(vfmj[csizeKey.c_str()].get<std::string>());
+        f.chunks[chunkId].md5 = std::string(vfmj[cmd5Key.c_str()].get<std::string>().c_str(), MD5_DIGEST_LENGTH);
+        f.chunksCorrupted[chunkId] = std::stoi(vfmj[cbadKey.c_str()].get<std::string>()); // TODO: double check this field; make sure it's correct
+        f.chunks[chunkId].setId(f.namespaceId, f.uuid, chunkId);
+        f.chunks[chunkId].data = 0;
+        f.chunks[chunkId].freeData = true;
+        f.chunks[chunkId].fileVersion = f.version;
+    }
+
+    // get block attributes for deduplication
+    BlockLocation::InObjectLocation loc;
+    Fingerprint fp;
+    char blockName[FDB_MAX_KEY_SIZE];
+
+    int noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
+    int hasFpOfs = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
+    int lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH + sizeof(int);
+
+    if (getBlocks == 1 || getBlocks == 3)
+    { // unique blocks
+        int pOffset = 0;
+        for (size_t blockId = 0; blockId < numUniqueBlocks; blockId++)
+        {
+            genBlockKey(blockId, blockName, /* is unique */ true);
+            std::string blockStr = vfmj[std::string(blockName).c_str()].get<std::string>();
+            loc._offset = std::stoull(blockStr.substr(pOffset, sizeof(unsigned long int)));
+            loc._length = std::stoull(blockStr.substr(pOffset + sizeof(unsigned long int), sizeof(unsigned int)));
+            if (vfmj[std::string(blockName).c_str()].size() <= lengthWithFp)
+            {
+                fp.set(blockStr.substr(pOffset + noFpOfs, SHA256_DIGEST_LENGTH).c_str());
+            }
+            else
+            {
+                fp.set(blockStr.substr(pOffset + hasFpOfs, SHA256_DIGEST_LENGTH).c_str());
+            }
+
+            auto followIt = f.uniqueBlocks.end(); // hint is the item after the element to insert for c++11, and before the element for c++98
+            f.uniqueBlocks.emplace_hint(followIt, std::make_pair(loc, std::make_pair(fp, pOffset)));
+        }
+    }
+
+    if (getBlocks == 2 || getBlocks == 3)
+    { // duplicate blocks
+        int noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
+        int lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
+
+        for (size_t blockId = 0; blockId < numDuplicateBlocks; blockId++)
+        {
+            genBlockKey(blockId, blockName, /* is unique */ false);
+
+            loc._offset = std::stoull(vfmj[std::string(blockName).c_str()].substr(0, sizeof(unsigned long int)));
+            loc._length = std::stoull(vfmj[std::string(blockName).c_str()].substr(sizeof(unsigned long int), sizeof(unsigned int)));
+
+            if (vfmj[std::string(blockName).c_str()].size() >= lengthWithFp)
+            {
+                fp.set(vfmj[std::string(blockName).c_str()].substr(noFpOfs, SHA256_DIGEST_LENGTH).c_str());
+            }
+
+            auto followIt = f.duplicateBlocks.end(); // hint is the item after the element to insert for c++11, and before the element for c++98
+            f.duplicateBlocks.emplace_hint(followIt, std::make_pair(loc, fp));
+        }
+    }
+
     return true;
 }
 
