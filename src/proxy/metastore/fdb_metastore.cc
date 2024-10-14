@@ -597,6 +597,31 @@ bool FDBMetaStore::deleteMeta(File &f)
 
 bool FDBMetaStore::renameMeta(File &sf, File &df)
 {
+    // file names
+    char srcfileKey[PATH_MAX], dstfileKey[PATH_MAX];
+    int snameLength = genFileKey(sf.namespaceId, sf.name, sf.nameLength, srcfileKey);
+    int dnameLength = genFileKey(df.namespaceId, df.name, df.nameLength, dstfileKey);
+    std::string sprefix = getFilePrefix(srcfileKey);
+    std::string dprefix = getFilePrefix(dstfileKey);
+
+    // file uuids
+    char srcFileUuidKey[MAX_KEY_SIZE + 64], dstFileUuidKey[MAX_KEY_SIZE + 64];
+    sf.genUUID();
+    df.genUUID();
+    if (!genFileUuidKey(sf.namespaceId, sf.uuid, srcFileUuidKey))
+        return false;
+    if (!genFileUuidKey(df.namespaceId, df.uuid, dstFileUuidKey))
+        return false;
+
+    // update file names
+    std::lock_guard<std::mutex> lk(_lock);
+
+    // rename file key from srcFileKey to dstFileKey
+
+    // set dfidKey; remove the original sfidKey (check putMeta impl)
+    // update uuid-to-file-name mapping
+    // update the file prefix set
+
     return true;
 }
 
