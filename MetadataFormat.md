@@ -73,6 +73,22 @@
 * Get block attributes for deduplication
     * Handle for different dedup attributes
 
+#### deleteMeta()
+
+TBD
+
+#### renameMeta()
+
+* sfname: source filename; dfname: destination filename
+* Generate FileKeys, FilePrefix and FileUUIDKey for sfname and dfname
+* add lock_guard()
+* rename the sfname to dfname
+* Set dfidKey to dfname (reverse mapping); remove the original sfidKey; if
+  wrong, should reverse the update
+* Set UUIDKey to dfname: if unsuccessful, should reverse the update
+* Remove the previous filePrefix from prefix set
+* Add the new prefix filePrevix to prefix set
+
 
 ## FDB
 
@@ -103,3 +119,6 @@
         * Workflow: the same as Redis-based metastore
 
 #### getMeta()
+
+* The flow of getMeta() is very similar to Redis-based metastore; will update
+  details after impl
