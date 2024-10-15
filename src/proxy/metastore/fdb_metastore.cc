@@ -879,6 +879,124 @@ bool FDBMetaStore::updateTimestamps(const File &f)
 
 int FDBMetaStore::updateChunks(const File &f, int version)
 {
+    std::lock_guard<std::mutex> lk(_lock);
+
+    char fileKey[PATH_MAX];
+    int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
+
+    // update the latest version
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // check whether the file metadata exists
+    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0 /** not set snapshot */);
+    exitOnError(fdb_future_block_until_ready(fileMetaFut));
+    fdb_bool_t fileMetaExist;
+    const uint8_t *fileMetaRaw = NULL;
+    int fileMetaRawLength;
+    exitOnError(fdb_future_get_value(fileMetaFut, &fileMetaExist, &fileMetaRaw, &fileMetaRawLength));
+    fdb_future_destroy(fileMetaFut);
+    fileMetaFut = nullptr;
+
+    // current metadata format: key: filename; value: {"verList": [v0, v1, v2,
+    // ...]}; for non-versioned system, verList only stores v0
+    nlohmann::json *fmjptr = new nlohmann::json();
+    auto &fmj = *fmjptr;
+
+    std::String verFileKey;
+
+    if (fileMetaExist == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::updateTimestamps() failed to get metadata for file " << f.name;
+
+        // commit transaction and return
+        delete fmjptr;
+        FDBFuture *fcmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(fcmt));
+        fdb_future_destroy(fcmt);
+
+        return false;
+    }
+    else
+    {
+        // parse fileMeta as JSON object
+        try
+        {
+            std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
+            fmj = nlohmann::json::parse(filMetaRawStr);
+        }
+        catch (std::exception e)
+        {
+            LOG(ERROR) << "FDBMetaStore::updateTimestamps() Error parsing JSON string: " << e.what();
+            exit(1);
+        }
+
+        delete fmjptr;
+
+        verFileKey = fmj["verList"].back().get<std::string>();
+    }
+
+    // find metadata for current file version
+    FDBFuture *verFileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, 0 /** not set snapshot */);
+    exitOnError(fdb_future_block_until_ready(verFileMetaFut));
+    fdb_bool_t verFileMetaExist;
+    const uint8_t *verFileMetaRaw = NULL;
+    int verFileMetaRawLength;
+    exitOnError(fdb_future_get_value(verFileMetaFut, &verFileMetaExist, &verFileMetaRaw, &verFileMetaRawLength));
+    fdb_future_destroy(verFileMetaFut);
+    verFileMetaFut = nullptr;
+
+    nlohmann::json *vfmjptr = new nlohmann::json();
+    auto &vfmj = *vfmjptr;
+
+    if (verFileMetaExist == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::updateTimestamps() failed to get versioned metadata for file " << f.name;
+
+        // commit transaction and return
+        delete vfmjptr;
+        FDBFuture *fcmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(fcmt));
+        fdb_future_destroy(fcmt);
+
+        return false;
+    }
+    else
+    {
+        // parse fileMeta as JSON object
+        try
+        {
+            std::string verFileMetaRawStr(reinterpret_cast<const char *>(verFileMetaRaw));
+            vfmj = nlohmann::json::parse(verFileMetaRawStr);
+        }
+        catch (std::exception e)
+        {
+            LOG(ERROR) << "FDBMetaStore::updateTimestamps() Error parsing JSON string: " << e.what();
+            exit(1);
+        }
+
+        // update Chunk information
+        char chunkName[MAX_KEY_SIZE];
+        for (int i = 0; i < f.numChunks; i++)
+        {
+            genChunkKeyPrefix(f.chunks[i].getChunkId(), chunkName);
+
+            std::string cidKey = std::string(chunkName) + std::string("-cid");
+            vfmj[cidKey.c_str()] = std::to_string(f.containerIds[i]);
+            std::string csizeKey = std::string(chunkName) + std::string("-size");
+            vfmj[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
+        }
+
+        // serialize json to string and store in FDB
+        std::string vfmjStr = vfmj.dump();
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
+        delete vfmjptr;
+    }
+
+    LOG(INFO) << "FDBMetaStore:: updateChunks() finished";
+
     return true;
 }
 

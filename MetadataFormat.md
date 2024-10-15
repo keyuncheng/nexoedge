@@ -93,6 +93,12 @@ TBD
 
 * add lock_guard()
 * update atime, mtime and ctime
+* Verify version
+* Set chunks (cid; size)
+
+#### updateChunks()
+
+* add lock_guard()
 
 
 ## FDB
