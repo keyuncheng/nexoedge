@@ -122,3 +122,8 @@ TBD
 
 * The flow of getMeta() is very similar to Redis-based metastore; will update
   details after impl
+
+#### renameMeta()
+
+* The flow of renameMeta() is very similar to Redis-based metastore; will
+  update details after impl
