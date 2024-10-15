@@ -1002,6 +1002,13 @@ int FDBMetaStore::updateChunks(const File &f, int version)
 
 bool FDBMetaStore::getFileName(boost::uuids::uuid fuuid, File &f)
 {
+    std::lock_guard<std::mutex> lk(_lock);
+
+    char fileUuidKey[FDB_MAX_KEY_SIZE + 64];
+    if (!genFileUuidKey(f.namespaceId, fuuid, fileUuidKey))
+        return false;
+    return getFileName(fileUuidKey, f);
+
     return true;
 }
 
@@ -1184,6 +1191,45 @@ void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
     LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
 
     return;
+}
+
+bool FDBMetaStore::getFileName(char fileUuidKey[], File &f)
+{
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // check whether the file metadata exists
+    FDBFuture *fileKeyFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileUuidKey), FDB_MAX_KEY_SIZE + 64, 0 /** not set snapshot */);
+    exitOnError(fdb_future_block_until_ready(fileKeyFut));
+    fdb_bool_t fileKeyExist;
+    const uint8_t *fileKeyRaw = NULL;
+    int fileKeyRawLength;
+    exitOnError(fdb_future_get_value(fileKeyFut, &fileKeyExist, &fileKeyRaw, &fileKeyRawLength));
+    fdb_future_destroy(fileKeyFut);
+    fileKeyFut = nullptr;
+
+    if (fileKeyFut == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::getFileName() failed to get filename from fileUuidKey " << fileUuidKey;
+        return false;
+    }
+    else
+    {
+        // copy to file name
+        std::string fileKeyRawStr(reinterpret_cast<const char *>(fileKeyRaw));
+        f.nameLength = fileKeyRawStr.size();
+        f.name = (char *)malloc(f.nameLength + 1);
+        strncpy(f.name, fileKeyRawStr.c_str(), f.nameLength);
+        f.name[f.nameLength] = 0;
+
+        // commit transaction and return
+        FDBFuture *fcmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(fcmt));
+        fdb_future_destroy(fcmt);
+
+        return true;
+    }
 }
 
 int FDBMetaStore::genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[])

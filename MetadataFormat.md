@@ -100,6 +100,18 @@ TBD
 
 * add lock_guard()
 
+#### getFileName(fuuid, f)
+
+Will use getFileName(filename, f) to get the filename
+
+* Flow of getFileName(filename, f):
+    * getfilename
+    * Process name
+
+#### getFileList()
+
+### getFolderList()
+
 
 ## FDB
 
