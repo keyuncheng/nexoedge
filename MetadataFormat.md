@@ -89,6 +89,11 @@ TBD
 * Remove the previous filePrefix from prefix set
 * Add the new prefix filePrevix to prefix set
 
+#### updateTimestamps()
+
+* add lock_guard()
+* update atime, mtime and ctime
+
 
 ## FDB
 
