@@ -110,7 +110,14 @@ Will use getFileName(filename, f) to get the filename
 
 #### getFileList()
 
+* 
+
 ### getFolderList()
+
+* add lock_guard()
+* getFilePrefix
+* SSCAN to match directory prefix by cursor
+* List out all the directories
 
 
 ## FDB
