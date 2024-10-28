@@ -4,6 +4,8 @@
 
 **Nexoedge is a multi-cloud storage system that employs erasure coding for data protection**. It applies a network-coding-inspired data repair technique on erasure coding for improved repair performance and supports major cloud storage providers as storage destinations. Nexoedge enables applications to seamlessly utilize storage services by major cloud storage providers as a unified reliable and storage-efficient storage pool.
 
+[Nexoedge is an *at-large* stage project under the Linux Foundation Edge.](https://lfedge.org/projects/nexoedge/)
+
 ## Overview
 
 The system consists of two key entities: *proxy* and *agent*.
