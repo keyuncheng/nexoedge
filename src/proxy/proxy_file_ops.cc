@@ -321,7 +321,7 @@ bool Proxy::modifyFile(File &f, bool isAppend) {
                 rf.name = 0;
                 okay = false;
             } else {
-                if (!readFile(rf, /* is partial */ rf.offset != 0)) {
+                if (!readFile(rf, /* is partial */ rf.offset != 0 || rf.offset + rf.length < of.size)) {
                     rf.name = 0;
                     okay = false;
                 } else {
