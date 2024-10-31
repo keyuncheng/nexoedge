@@ -184,6 +184,7 @@ private:
     void setValueAndCommit(std::sgetring key, std::string value);
 
     // helper functions (mostly copied from RedisMetaStore)
+    bool markFileRepairStatus(const File &file, bool needsRepair);
     bool getFileName(char fileUuidKey[], File &f);
     int genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
     int genVersionedFileKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]);

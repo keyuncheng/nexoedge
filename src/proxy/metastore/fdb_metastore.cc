@@ -21,6 +21,7 @@
 #define FDB_BG_TASK_PENDING_KEY "//snccFBgTask"
 #define FDB_DIR_LIST_KEY "//snccDirList"
 #define FDB_JL_LIST_KEY "//snccJournalFSet"
+#define FDB_FILE_PREFIX_KEY "//pf_"
 
 #define FDB_MAX_KEY_SIZE (64)
 #define FDB_NUM_REQ_FIELDS (10)
@@ -1024,11 +1025,14 @@ unsigned int FDBMetaStore::getFolderList(std::vector<std::string> &list, unsigne
 
 unsigned long int FDBMetaStore::getMaxNumKeysSupported()
 {
-    return 0;
+    // max = (1 << 32) - 1 - FDB_NUM_RESERVED_SYSTEM_KEYS, but we store also uuid for each file
+    return (unsigned long int)(1 << 31) - FDB_NUM_RESERVED_SYSTEM_KEYS / 2 - (FDB_NUM_RESERVED_SYSTEM_KEYS % 2);
 }
 
 unsigned long int FDBMetaStore::getNumFiles()
 {
+    // TODO: decide how to count the number of files
+
     return 0;
 }
 
@@ -1044,12 +1048,17 @@ int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
 
 bool FDBMetaStore::markFileAsNeedsRepair(const File &file)
 {
-    return false;
+    return markFileRepairStatus(file, false);
 }
 
 bool FDBMetaStore::markFileAsRepaired(const File &file)
 {
-    return false;
+    return markFileRepairStatus(file, true);
+}
+
+bool RedisMetaStore::markFileRepairStatus(const File &file, bool needsRepair)
+{
+    return markFileStatus(file, FDB_FILE_REPAIR_KEY, needsRepair, "repair");
 }
 
 bool FDBMetaStore::markFileAsPendingWriteToCloud(const File &file)
@@ -1254,16 +1263,24 @@ bool FDBMetaStore::genFileUuidKey(unsigned char namespaceId, boost::uuids::uuid 
 
 std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
 {
-    const char *slash = strrchr(name, '/'), *us = strchr(name, '_');
-    std::string prefix("//pf_");
-    // file on root directory, or root directory (ends with one '/')
+    // the location of sub-dirs
+    const char *slash = strrchr(name, '/');
+
+    // the location of first '_' (to locate namespace)
+    const char *us = strchr(name, '_');
+
+    std::string filePrefix(FDB_FILE_PREFIX_KEY);
+    // file on root directory (namespace_filename), or root directory (ends
+    // with one '/' (namespace_/))
     if (slash == NULL || us + 1 == slash)
     {
-        prefix.append(name, us - name + 1);
-        return noEndingSlash ? prefix : prefix.append("/");
+        // set filePrefix to "FDB_FILE_PREFIX_KEY<namesapce>_"
+        filePrefix.append(name, us - name + 1);
+        // append a slash at the end
+        return noEndingSlash ? filePrefix : filePrefix.append("/");
     }
-    // sub-directory
-    return prefix.append(name, slash - name);
+    // set filePrefix to //pf_dirname
+    return filePrefix.append(name, slash - name);
 }
 
 int FDBMetaStore::genChunkKeyPrefix(int chunkId, char prefix[])

@@ -22,11 +22,26 @@
         * Without versioning: only keep the latest version (through genVersFileKeys())
         * With versioning: keep all versions (through genVersFileKeys())
 
-### Workflow
+### Functions
+
+#### extractJournalFieldKeyParts()
+
+* TBD
+
+#### RedisMetaStore()
+
+* Connect to Redis server through IP and port
+* Init _taskScanIt and _endOfPendingWriteSet (Todo: usage?)
+
+#### ~RedisMetaStore()
+
+* Free Redis context
 
 #### putMeta()
 
 * Add lock_guard()
+* Generate FileKey
+* Generate FilePrefix from FileKey
 * Check file versioning (now assume versioning is enabled)
     * If the incoming request has higher version than the current version, backup the current version
         * Rename current hash key (filename) to versionedFileKey ( current version - 1)
@@ -119,6 +134,23 @@ Will use getFileName(filename, f) to get the filename
 * SSCAN to match directory prefix by cursor
 * List out all the directories
 
+#### genFileKey()
+
+* FileKey format: namespaceId_filename
+
+#### getFilePrefix()
+
+* slash: the last occurence of position of '/'
+* us: the first position of '_', usually between namespace and filename
+
+* prefix starts with "//pf_"
+
+* If the file is on root directory ("namespace_filename", without '/'), or the
+  file itself is the root: directory 'namespace_/'
+    * Set file prefix to "//pf_namespace_" (without the filename or '/')
+    * If noEndingSlash == false, append a '/' at the end of the prefix
+* Otherwise, the file is stored in a sub-directory
+    * Set the file prefix to "pf_namespace_subdirs/"
 
 ## FDB
 
