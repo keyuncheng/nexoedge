@@ -62,13 +62,10 @@
 
 #### getMeta()
 
-* Input: assume that f.version is set (-1: non-versioned; otherwise versioned)
 * add lock_guard()
 * set filename as fileKey
-* If enabled versioning
-    * get current version
-    * if retrieved version is different from f.version
-        * set filename as versionedFileKey
+* If enabled versioning, if retrieved version is different from f.version
+    * set filename as versionedFileKey with the specified version
 * Get fields
     * filename (versioned/non-versioned): 
         * Check redis_metastore.cc:313-321
