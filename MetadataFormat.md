@@ -4,23 +4,15 @@
 
 ### Metadata Data Structure
 
-* Filename (assume filename is "abc")
-    * genFileKey(File) -> filename = "namespaceId_abc"
-    * getFilePrefix(filename) ->
-        * Directory: "//pf_(dirname)"
-        * File: "//pf_(everything-before-slash)"
+* File
     * FileKey
-        * without versioning: through genFileKey()
-        * with versioning
-            * the latest one: through genFileKey()
-            * Previous versions: through genVersionedFileKeys()
-    * getFilePrefix(filename) ->
-        * Directory: "//pf_(dirname)"
-        * File: "//pf_(everything-before-slash)"
-    * FileKey
-        * wi/wo versioning: through genFileKey()
-        * Without versioning: only keep the latest version (through genVersFileKeys())
-        * With versioning: keep all versions (through genVersFileKeys())
+    * (verFileKey0, verFileKey1, ...)
+    * FileUUID
+    * FileVersionList
+
+* File prefix set
+
+* DIR_LIST_KEY -> File prefix set
 
 ### Functions
 
@@ -42,24 +34,30 @@
 * Add lock_guard()
 * Generate FileKey
 * Generate FilePrefix from FileKey
-* Check file versioning (now assume versioning is enabled)
-    * If the incoming request has higher version than the current version, backup the current version
-        * Rename current hash key (filename) to versionedFileKey ( current version - 1)
-        * Backup some fields from versionedFileKey (size mtime md5 dm numC) to versionedList
-            * Get version list key ("//vl_filename)
+* Obtain current file version (if it exists in the metastore)
+    * Set to curVersion
+* Now assume versioning is enabled
+    * If the input file has higher version than the currently stored version, backup the current version
+        * Rename current FileKey to versionedFileKey, with input file version - 1
+        * Backup some fields from versionedFileKey (size mtime md5 dm numC) to FileVersionList
+            * Get FileVersionListKey
             * Create a file version summary and append to version list
-                * Format: version mtime md5 dm numC
+                * Format: version-1 size mtime md5 dm numC
+            * Append summary to FileVersionList with version-1
     * If the incoming File has older version than the current stored version
-        * Find the current previous version, make sure it exists in the current metadata store
-        * Update filename to versionedFilename (in f.version)
-* Set fields
+        * Find the current previous version, make sure it exists in the
+          current metadata store
+            * obtain by genFileVersionListKey
+            * Find the current version with ZRANGEBYSCORE 
+        * Set filename as versionedFilename (in f.version), otherwise no need to update filename
+* Set fields to filename
     * filename (versioned/non-versioned): 
         * Bind with filename: Check redis_metastore.cc:180-188
         * Bind with containers: Check redis_metastore.cc:213-219
         * Bind with deduplication: Check redis_metastore.cc:221-242
     * Set file uuid to filename mapping
-    * Set add directory prefix set (file prefix -> filename)
-    * Set add global directory prefix set (DIR_LIST_KEY -> file prefix)
+    * Add directory prefix set (file prefix set -> filename)
+    * Add directory prefix set (DIR_LIST_KEY -> file prefix)
 
 
 #### getMeta()
@@ -137,6 +135,14 @@ Will use getFileName(filename, f) to get the filename
 #### genFileKey()
 
 * FileKey format: namespaceId_filename
+
+#### genVersionedFileKey()
+
+* Versioned FileKey format: "/namespace_filename'\n'version"
+
+#### genFileVersionListKey()
+
+* FileVersionListKey format: "//vlnamespaceid_name"
 
 #### getFilePrefix()
 
