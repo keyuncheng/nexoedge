@@ -854,6 +854,7 @@ bool ChunkManager::operateOnAliveChunks(const File &file, bool chunkIndicator[],
 }
 
 bool ChunkManager::repairFile(File &file, bool *chunkIndicator, int *spareContainers, int *chunkGroups, int numChunkGroups) {
+    // TODO support partial repair success (some but not all repaired chunks are stored)
 
     // benchmark
     BMRepair *bmRepair = dynamic_cast<BMRepair*>(Benchmark::getInstance().at(file.reqId));
@@ -913,7 +914,7 @@ bool ChunkManager::repairFile(File &file, bool *chunkIndicator, int *spareContai
         inputChunkIndices[i] = inputChunkIds.at(i);
     }
 
-    bool isRepairAtProxy = Config::getInstance().isRepairAtProxy() || numFailedNodes > 1;
+    bool isRepairAtProxy = Config::getInstance().isRepairAtProxy();
     bool isRepairUsingCAR = Config::getInstance().isRepairUsingCAR() && numFailedNodes == 1;
     int numFailedChunks = numFailedNodes * numChunksPerNode;
     // number of failed chunks can be greater than input, e.g., replication

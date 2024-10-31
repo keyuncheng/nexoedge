@@ -249,160 +249,191 @@ void *Agent::handleChunkEvent(void *arg) {
             bool isCAR = event.repairUsingCAR;
             bool useEncode = isCAR;
             int numChunksPerNode = 1;
-            int numReq = isCAR? event.numChunkGroups : event.chunkGroupMap[0];
+            int numInputChunkReq = isCAR? event.numChunkGroups : event.chunkGroupMap[0];
+            int numInputChunkReqSent = 0;
             // construct the requests for input chunks
-            ChunkEvent getInputEvents[numReq * 2];
-            IO::RequestMeta meta[numReq];
-            pthread_t rt[numReq];
-            unsigned char matrix[numReq];
+            ChunkEvent getInputEvents[numInputChunkReq * 2];
+            IO::RequestMeta meta[numInputChunkReq];
+            pthread_t rt[numInputChunkReq];
+            unsigned char matrix[numInputChunkReq];
             unsigned char namespaceId = event.chunks[0].getNamespaceId();
             boost::uuids::uuid fileuuid = event.chunks[0].getFileUUID();
             int version = event.chunks[0].getFileVersion();
             //DLOG(INFO) << "Number of chunk groups = " << event.numChunkGroups << " address " << event.agents;
             
-            DLOG(INFO) << "START of chunk repair useCar = " << isCAR << " numReq = " << numReq;
-            int cpos = 0; // chunk list starting position
-            int spos = 0, epos = 0; // agent address positions
-            for (int i = 0; i < numReq; i++) {
-                // setup the event
-                int numChunks = isCAR? event.chunkGroupMap[i + cpos] : numChunksPerNode;
-                getInputEvents[i].id = self->_eventCount.fetch_add(1);
-                // encode if using CAR with 1 chunk to repair, else get the original chunk
-                getInputEvents[i].opcode = useEncode? Opcode::ENC_CHUNK_REQ : Opcode::GET_CHUNK_REQ;
-                getInputEvents[i].numChunks = numChunks;
-                getInputEvents[i].containerIds = &event.containerGroupMap[cpos];
-                getInputEvents[i].chunks = new Chunk[numChunks];
-                if (getInputEvents[i].chunks == NULL) {
+            DLOG(INFO) << "START of chunk repair useCar = " << isCAR << " numInputChunkReq = " << numInputChunkReq;
+            int chunkPos = 0; // chunk list starting position
+            int agentAddrStPos = 0, agentAddrEdPos = 0; // agent address positions
+            for (int reqIdx = 0; reqIdx < numInputChunkReq; reqIdx++, numInputChunkReqSent++) {
+                // set up the get-input-chunk event
+                ChunkEvent &curEvent = getInputEvents[reqIdx];
+                int numChunks = isCAR? event.chunkGroupMap[reqIdx + chunkPos] : numChunksPerNode;
+                curEvent.id = self->_eventCount.fetch_add(1);
+                // ask the agent to partial encode the input chunks when using CAR, otherwise get the original chunk
+                curEvent.opcode = useEncode? Opcode::ENC_CHUNK_REQ : Opcode::GET_CHUNK_REQ;
+                curEvent.numChunks = numChunks;
+                curEvent.containerIds = &event.containerGroupMap[chunkPos];
+                try {
+                    curEvent.chunks = new Chunk[numChunks];
+                } catch (std::bad_alloc &e) {
+                    // abort if the agent runs out of memory
                     LOG(ERROR) << "Failed to allocate memory for " << numChunks << " chunks";
-                    exit(1);
+                    break;
                 }
-                for (int j = 0; j < numChunks; j++) {
-                    int cid = isCAR? event.chunkGroupMap[cpos + i + j + 1]:
-                            event.chunkGroupMap[cpos + j + 1];
-                    getInputEvents[i].chunks[j].setId(namespaceId, fileuuid, cid);
-                    getInputEvents[i].chunks[j].size = 0;
-                    getInputEvents[i].chunks[j].data = 0;
-                    getInputEvents[i].chunks[j].fileVersion = version;
+                for (int chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+                    int cid = isCAR? event.chunkGroupMap[chunkPos + reqIdx + chunkIdx + 1]:
+                            event.chunkGroupMap[chunkPos + chunkIdx + 1];
+                    Chunk &curChunk = curEvent.chunks[chunkIdx];
+                    curChunk.setId(namespaceId, fileuuid, cid);
+                    curChunk.size = 0;
+                    curChunk.data = NULL;
+                    curChunk.fileVersion = version;
                 }
                 if (isCAR) {
-                    getInputEvents[i].codingMeta.codingStateSize = numChunks;
-                    getInputEvents[i].codingMeta.codingState = &event.codingMeta.codingState[cpos];
-                    // set the matrix coefficient (addition/XOR operation)
-                    matrix[i] = 1;
+                    curEvent.codingMeta.codingStateSize = numChunks;
+                    curEvent.codingMeta.codingState = &event.codingMeta.codingState[chunkPos];
+                    // set the final decoding matrix coefficient to 1 for XOR operations on the partial encoded chunks
+                    matrix[reqIdx] = 1;
                 } else if (useEncode) {
-                    getInputEvents[i].codingMeta.codingStateSize = numChunks;
-                    getInputEvents[i].codingMeta.codingState = matrix + i;
-                    matrix[i] = 1;
+                    curEvent.codingMeta.codingStateSize = numChunks;
+                    curEvent.codingMeta.codingState = matrix + reqIdx;
+                    // set the final decoding matrix coefficient to 1 for XOR operations on the partial encoded chunks
+                    matrix[reqIdx] = 1;
                 }
-                // setup request metadata
-                meta[i].isFromProxy = false;
-                meta[i].containerId = event.containerGroupMap[cpos];
-                meta[i].cxt = &(self->_cxt);
-                epos = event.agents.find(';', spos);
-                meta[i].address = event.agents.substr(spos, epos - spos);
-                spos = epos + 1;
-                meta[i].request = &getInputEvents[i];
-                meta[i].reply = &getInputEvents[numReq + i];
+                IO::RequestMeta &curMeta = meta[reqIdx];
+                // set up the request-response metadata pair
+                curMeta.isFromProxy = false;
+                curMeta.containerId = event.containerGroupMap[chunkPos];
+                curMeta.cxt = &(self->_cxt);
+                agentAddrEdPos = event.agents.find(';', agentAddrStPos);
+                curMeta.address = event.agents.substr(agentAddrStPos, agentAddrEdPos - agentAddrStPos);
+                agentAddrStPos = agentAddrEdPos + 1;
+                curMeta.request = &getInputEvents[reqIdx];
+                curMeta.reply = &getInputEvents[numInputChunkReq + reqIdx];
                 // send the request
-                pthread_create(&rt[i], NULL, IO::sendChunkRequestToAgent, (void *) &meta[i]);
+                pthread_create(&rt[reqIdx], NULL, IO::sendChunkRequestToAgent, (void *) &meta[reqIdx]);
                 // increment chunk list position
-                cpos += numChunks;
+                chunkPos += numChunks;
             }
             // check the chunk replies
-            bool allsuccess = true;
-            unsigned char *input[numReq], *output[event.numChunks];
+            bool allsuccess = numInputChunkReq == numInputChunkReqSent;
+            unsigned char *input[numInputChunkReq], *output[event.numChunks];
             int chunkSize = 0;
-            for (int i = 0; i < numReq; i++) {
+            for (int reqIdx = 0; reqIdx < numInputChunkReqSent; reqIdx++) {
                 // wait for the request to complete
-                void *ptr = 0;
-                pthread_join(rt[i], &ptr);
+                void *ptr = NULL;
+                pthread_join(rt[reqIdx], &ptr);
+                IO::RequestMeta &curMeta = meta[reqIdx];
+                ChunkEvent &curReqEvent = getInputEvents[reqIdx];
                 // avoid freeing reference to local variables
-                getInputEvents[i].containerIds = 0; 
-                getInputEvents[i].codingMeta.codingState = 0; 
+                curReqEvent.containerIds = nullptr; 
+                curReqEvent.codingMeta.codingState = NULL; 
                 Opcode expectedOp = useEncode? ENC_CHUNK_REP_SUCCESS : GET_CHUNK_REP_SUCCESS;
-                if (ptr != 0 || meta[i].reply->opcode != expectedOp) {
-                    LOG(ERROR) << "Failed to operate on chunk (" << ENC_CHUNK_REQ << ") due to internal failure, container id = " << meta[i].containerId << ", return opcode =" << meta[i].reply->opcode;
+                if (ptr != NULL || curMeta.reply->opcode != expectedOp) {
+                    LOG(ERROR) << "Failed to operate on chunk due to internal failure, container id = " << curMeta.containerId << ", return opcode =" << curMeta.reply->opcode;
                     allsuccess = false;
                     continue;
                 }
-                input[i] = meta[i].reply->chunks[0].data;
-                chunkSize = meta[i].reply->chunks[0].size;
+                input[reqIdx] = curMeta.reply->chunks[0].data;
+                chunkSize = curMeta.reply->chunks[0].size;
             }
             // start repair after getting all required chunks
             if (allsuccess) {
-                for (int i = 0; i < event.numChunks; i++) {
-                    event.chunks[i].data = (unsigned char *) malloc (chunkSize);
-                    event.chunks[i].size = chunkSize;
-                    output[i] = event.chunks[i].data;
+                for (int chunkIdx = 0; chunkIdx < event.numChunks; chunkIdx++) {
+                    Chunk &curChunk = event.chunks[chunkIdx];
+                    curChunk.data = (unsigned char *) malloc (chunkSize);
+                    if (curChunk.data == NULL) {
+                        LOG(ERROR) << "Failed to allocate memeory for storing repaired chunks (" << chunkIdx << " of " << event.numChunks - 1 << "chunks)";
+                        allsuccess = false;
+                        break;
+                    }
+                    curChunk.size = chunkSize;
+                    output[chunkIdx] = curChunk.data;
                 }
                 // do decoding
-                CodingUtils::encode(input, numReq, output, event.numChunks, chunkSize, isCAR? matrix : event.codingMeta.codingState);
+                CodingUtils::encode(input, numInputChunkReq, output, event.numChunks, chunkSize, isCAR? matrix : event.codingMeta.codingState);
                 // compute checksum
-                for (int i = 0; i < event.numChunks; i++) {
-                    event.chunks[i].computeMD5();
+                for (int chunkIdx = 0; chunkIdx < event.numChunks; chunkIdx++) {
+                    event.chunks[chunkIdx].computeMD5();
                 }
-                // send chunks out
+                // send chunks to other agents for storage (keep first numChunksPerNode for local storage, and send out the remaining)
                 int numChunksToSend = isCAR? 0 : event.numChunks - numChunksPerNode;
                 int numChunkReqsToSend = numChunksToSend / numChunksPerNode;
+                int numChunkReqsSent = 0;
                 ChunkEvent storeChunkEvents[numChunkReqsToSend * 2];
                 IO::RequestMeta storeChunkMeta[numChunkReqsToSend];
                 pthread_t wt[numChunkReqsToSend];
-                for (int i = 0; i < numChunkReqsToSend; i++) {
+                for (int reqIdx = 0; reqIdx < numChunkReqsToSend; reqIdx++, numChunkReqsSent++) {
+                    ChunkEvent &curEvent = storeChunkEvents[reqIdx];
                     // setup the request
-                    storeChunkEvents[i].id = self->_eventCount.fetch_add(1);
-                    storeChunkEvents[i].opcode = Opcode::PUT_CHUNK_REQ;
-                    storeChunkEvents[i].numChunks = numChunksPerNode;
-                    storeChunkEvents[i].chunks = new Chunk[storeChunkEvents[i].numChunks];
-                    storeChunkEvents[i].containerIds = new int[storeChunkEvents[i].numChunks];
-                    if (storeChunkEvents[i].chunks == NULL || storeChunkEvents[i].containerIds == NULL) {
-                        LOG(ERROR) << "Failed to allocate memeory for sending repaired chunks (" << i << " of " << event.numChunks - 1 << "chunks)";
-                        delete storeChunkEvents[i].chunks;
-                        delete storeChunkEvents[i].containerIds;
+                    curEvent.id = self->_eventCount.fetch_add(1);
+                    curEvent.opcode = Opcode::PUT_CHUNK_REQ;
+                    curEvent.numChunks = numChunksPerNode;
+                    try {
+                        curEvent.chunks = new Chunk[curEvent.numChunks];
+                        curEvent.containerIds = new int[curEvent.numChunks];
+                    } catch (std::bad_alloc &e) {
+                        LOG(ERROR) << "Failed to allocate memeory for sending repaired chunks (" << reqIdx << " of " << event.numChunks - 1 << "chunks)";
+                        delete curEvent.chunks;
+                        delete curEvent.containerIds;
                         allsuccess = false;
                         break;
                     }
                     // mark the chunks
-                    for (int j = 0; j < storeChunkEvents[i].numChunks; j++) {
-                        storeChunkEvents[i].chunks[j] = event.chunks[(i + 1) * storeChunkEvents[i].numChunks + j];
-                        storeChunkEvents[i].chunks[j].freeData = false;
-                        storeChunkEvents[i].containerIds[j] = event.containerIds[i + 1];
+                    for (int chunkIdx = 0; chunkIdx < curEvent.numChunks; chunkIdx++) {
+                        Chunk &curChunk = curEvent.chunks[chunkIdx];
+                        curChunk = event.chunks[(reqIdx + 1) * curEvent.numChunks + chunkIdx];
+                        curChunk.freeData = false;
+                        curEvent.containerIds[chunkIdx] = event.containerIds[reqIdx + 1];  // skip the first container id for local chunk storage
                     }
                     // setup the io meta for request and reply
-                    storeChunkMeta[i].containerId = event.containerIds[i + 1];
-                    storeChunkMeta[i].request = &storeChunkEvents[i];
-                    storeChunkMeta[i].reply = &storeChunkEvents[i + numChunkReqsToSend];
-                    storeChunkMeta[i].cxt = &(self->_cxt);
-                    epos = event.agents.find(';', spos);
-                    storeChunkMeta[i].address = event.agents.substr(spos, epos - spos);
-                    spos = epos + 1;
+                    IO::RequestMeta &curMeta = storeChunkMeta[reqIdx];
+                    curMeta.containerId = event.containerIds[reqIdx + 1]; // skip the first container id for local chunk storage
+                    curMeta.request = &storeChunkEvents[reqIdx];
+                    curMeta.reply = &storeChunkEvents[reqIdx + numChunkReqsToSend];
+                    curMeta.isFromProxy = false;
+                    curMeta.cxt = &(self->_cxt);
+                    agentAddrEdPos = event.agents.find(';', agentAddrStPos);
+                    curMeta.address = event.agents.substr(agentAddrStPos, agentAddrEdPos - agentAddrStPos);
+                    agentAddrStPos = agentAddrEdPos + 1;
                     // send the request and wait for reply
-                    pthread_create(&wt[i], NULL, IO::sendChunkRequestToAgent, (void *) &storeChunkMeta[i]);
+                    pthread_create(&wt[reqIdx], NULL, IO::sendChunkRequestToAgent, (void *) &storeChunkMeta[reqIdx]);
                 }
-                int numLocalChunks = isCAR? event.numChunks : numChunksPerNode;
-                int localContainerIds[numLocalChunks];
-                for (int i = 0; i < numLocalChunks; i++)
-                    localContainerIds[i] = event.containerIds[0];
-                // put chunk locally
-                if (self->_containerManager->putChunks(localContainerIds, event.chunks, numLocalChunks) == true) {
-                    LOG(INFO) << "Put " << numLocalChunks << " repaired chunks into containers in " << mytimer.elapsed().wall * 1.0 / 1e9 << " seconds";
-                } else {
-                    LOG(ERROR) << "Failed to put " << numLocalChunks << " repaired chunks into containers";
-                    allsuccess = false;
-                }
-                // TODO check if other chunks are stored successfully
-                for (int i = 0; i < numChunkReqsToSend; i++) {
-                    void *ptr = 0;
-                    pthread_join(wt[i], &ptr);
-                    if (ptr != 0 || storeChunkMeta[i].reply->opcode != Opcode::PUT_CHUNK_REP_SUCCESS) {
-                        LOG(ERROR) << "Failed to put " << storeChunkMeta[i].request->numChunks 
-                                   << " repaired chunk (" << storeChunkMeta[i].request->chunks[0].getChunkId() << ")"
-                                   << " to container " << storeChunkMeta[i].containerId
-                                   << " at " << storeChunkMeta[i].address;
+                if (numChunkReqsSent == numChunkReqsToSend) {
+                    int numLocalChunks = isCAR? event.numChunks : numChunksPerNode;
+                    int localContainerIds[numLocalChunks];
+                    for (int i = 0; i < numLocalChunks; i++)
+                        localContainerIds[i] = event.containerIds[0];
+                    // put chunk locally
+                    if (self->_containerManager->putChunks(localContainerIds, event.chunks, numLocalChunks) == true) {
+                        LOG(INFO) << "Put " << numLocalChunks << " repaired chunks into containers in " << mytimer.elapsed().wall * 1.0 / 1e9 << " seconds";
+                    } else {
+                        LOG(ERROR) << "Failed to put " << numLocalChunks << " repaired chunks into containers";
                         allsuccess = false;
                     }
                 }
+                for (int reqIdx = 0; reqIdx < numChunkReqsSent; reqIdx++) {
+                    void *ptr = 0;
+                    // check if other chunks are stored successfully
+                    pthread_join(wt[reqIdx], &ptr);
+                    IO::RequestMeta &curMeta = storeChunkMeta[reqIdx];
+                    if (ptr != 0 || curMeta.reply->opcode != Opcode::PUT_CHUNK_REP_SUCCESS) {
+                        LOG(ERROR) << "Failed to put " << curMeta.request->numChunks 
+                                   << " repaired chunk (" << curMeta.request->chunks[0].getChunkId() << ")"
+                                   << " to container " << curMeta.containerId
+                                   << " at " << curMeta.address;
+                        allsuccess = false;
+                    }
+                    // 'best-effort revert' by deleting successfully stored chunks due to the failure of others
+                    // TODO support partial success of a repair request at the proxy
+                    if (numChunksToSend != numChunkReqsSent) {
+                        IO::RequestMeta &curMeta = storeChunkMeta[reqIdx];
+                        curMeta.request->opcode = Opcode::DEL_CHUNK_REQ;
+                        IO::sendChunkRequestToAgent(&curMeta);
+                    }
+                }
             }
-            DLOG(INFO) << "END of chunk repair useCar = " << isCAR << " numReq = " << numReq;
+            DLOG(INFO) << "END of chunk repair useCar = " << isCAR << " numInputChunkReq = " << numInputChunkReq;
             // set reply, increment op count
             if (allsuccess) {
                 event.opcode = Opcode::RPR_CHUNK_REP_SUCCESS;
