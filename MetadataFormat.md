@@ -107,15 +107,15 @@
 
 #### renameMeta()
 
-* sfname: source filename; dfname: destination filename
-* Generate FileKeys, FilePrefix and FileUUIDKey for sfname and dfname
+* sfname, dfname: src/dst filename
+* sprefix, dprefix: src/dst file prefix
+* sfidKey, dfidKey: src/dst file uuid key
 * add lock_guard()
-* rename the sfname to dfname
-* Set dfidKey to dfname (reverse mapping); remove the original sfidKey; if
-  wrong, should reverse the update
-* Set UUIDKey to dfname: if unsuccessful, should reverse the update
-* Remove the previous filePrefix from prefix set
-* Add the new prefix filePrevix to prefix set
+* Rename the sfname to dfname (RENAMENX)
+* Create dst fuuid to filename mapping
+* Set filename fuuid
+* Remove src file prefix
+* Add dst file prefix
 
 #### updateTimestamps()
 
@@ -127,18 +127,20 @@
 #### updateChunks()
 
 * add lock_guard()
+* Update chunk information
 
 #### getFileName(fuuid, f)
 
-Will use getFileName(filename, f) to get the filename
+* Use getFileName(fuuidKey, f) to get the filename
 
-* Flow of getFileName(filename, f):
-    * getfilename
-    * Process name
 
 #### getFileList()
 
-* 
+* Generate sprefix: "//pf_namespace_prefix"
+
+* If no prefix or not directory prefix at the end
+    * Directly search "namespace_prefix"
+* Otherwise, search all members of sprefix
 
 ### getFolderList()
 
