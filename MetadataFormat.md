@@ -85,7 +85,25 @@
 
 #### deleteMeta()
 
-TBD
+* genFileKey()
+* genFileVersionListKey()
+* getFilePrefix()
+* check versioning
+* If the file metadata does not exist, cancel delete file metadata
+* If versioning enabled, lazy deletion is enabled, versionToDelete, no
+  specified version to delete, enable lazy deletion
+  * Call putMeta(f) to update metadata, to tell the caller not to remove the
+    data
+* If a specified version is to be deleted
+    * Obtain the current version (make sure it exists)
+    * Find all versions (sorted in order through ZCARD)
+    * If modifying the current version, set the second latest version as the
+      current version
+    * If no version to remove, return false (it's an invalid operation)
+    * Otherwise, remove a version
+* If no version is to be deleted, delete the current file
+* Delete fuuidKey mapping
+* Delete dirkey and filekey mapping
 
 #### renameMeta()
 
