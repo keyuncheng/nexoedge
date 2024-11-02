@@ -141,13 +141,47 @@
 * If no prefix or not directory prefix at the end
     * Directly search "namespace_prefix"
 * Otherwise, search all members of sprefix
+* Handle reply
+    * Skip system keys
+    * For each valid file keys, get required keys
+        * If with version, add version information
 
-### getFolderList()
+#### getFolderList()
 
 * add lock_guard()
-* getFilePrefix
-* SSCAN to match directory prefix by cursor
-* List out all the directories
+* getFilePrefix // "//pf_namespace_a*"
+* SSCAN DIR_LIST_KEY and find matches
+* For each match, get the file list
+    * Handle skilSubfolders
+
+#### getMaxNumKeysSupported()
+
+* Return the unsigned long int - reserved system keys
+
+#### getNumFiles()
+
+* use DBSize to count the items in DB
+* Remove count for directories
+* Remove count for //sncc*
+* Divide count by 2. Reason: remove file to uuid_mapping
+
+#### getNumFilesToRepair()
+
+* Scan for FILE_REPAIR_KEY
+
+#### getFilesToRepair()
+
+* get from FILE_REPAIR_KEY
+
+* TODO: elaborate details
+
+#### markFileStatus()
+
+* Call SADD or SREM to update file list with a specified attribute
+
+#### Journaling()
+
+* TBD
 
 #### genFileKey()
 
@@ -174,6 +208,17 @@
     * If noEndingSlash == false, append a '/' at the end of the prefix
 * Otherwise, the file is stored in a sub-directory
     * Set the file prefix to "pf_namespace_subdirs/"
+
+#### getFileName()
+
+* Get filename from FileKey
+
+* Copy to input f.name
+
+#### lockFile()
+
+* Set operation
+
 
 ## FDB
 
