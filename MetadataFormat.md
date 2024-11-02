@@ -270,3 +270,7 @@
 * The same as Redis
 
 * Versioned FileKey format: "/namespace_filename'\n'version"
+
+#### getFilePrefix()
+
+* The same as Redis

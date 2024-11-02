@@ -90,9 +90,8 @@ bool FDBMetaStore::putMeta(const File &f)
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
     // Step 1: check whether the file metadata exists
-    bool fileMetaExist = false;
     std::string fileMetaStr;
-    fileMetaExist = getValueInTX(tx, std::string(fileKey), fileMetaStr);
+    bool fileMetaExist = getValueInTX(tx, std::string(fileKey), fileMetaStr);
 
     /**
      * @brief File metadata format
@@ -102,8 +101,8 @@ bool FDBMetaStore::putMeta(const File &f)
      *
      * @Note For non-versioned system, verList only stores v0
      */
-    nlohmann::json *fmjptr = new nlohmann::json();
-    auto &fmj = *fmjptr;
+    nlohmann::json *fmjPtr = new nlohmann::json();
+    auto &fmj = *fmjPtr;
 
     if (fileMetaExist == false)
     { // No file meta: init the new version
@@ -147,7 +146,7 @@ bool FDBMetaStore::putMeta(const File &f)
         {
             // If the version is not stored in the list, insert the
             // version
-            if (fmj["verList"].find(verFileKey) == fmj["verList"].end())
+            if (fmj["verId"].find(verFileKey) == fmj["verId"].end())
             {
                 int pos;
                 for (pos = 0; pos < fmj["verId"].size(); pos++)
@@ -169,9 +168,8 @@ bool FDBMetaStore::putMeta(const File &f)
     // Store file meta into FDB
     std::string fmjStr = fmj.dump();
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
-    delete fmjptr;
+    delete fmjPtr;
 
-    // TODO: resume here
     /**
      * @brief Versioned file metadata format
      * @Key verFileKey
@@ -185,38 +183,38 @@ bool FDBMetaStore::putMeta(const File &f)
     size_t numUniqueBlocks = f.uniqueBlocks.size();
     size_t numDuplicateBlocks = f.duplicateBlocks.size();
 
-    nlohmann::json *vfmjptr = new nlohmann::json();
-    auto &vfmj = *vfmjptr;
-    vfmj["name"] = std::string(f.name, f.name + f.nameLength);
-    vfmj["uuid"] = boost::uuids::to_string(f.uuid);
-    vfmj["size"] = std::to_string(f.size);
-    vfmj["numC"] = std::to_string(f.numChunks);
-    vfmj["sc"] = f.storageClass;
-    vfmj["cs"] = std::string(1, f.codingMeta.coding);
-    vfmj["n"] = std::to_string(f.codingMeta.n);
-    vfmj["k"] = std::to_string(f.codingMeta.k);
-    vfmj["f"] = std::to_string(f.codingMeta.f);
-    vfmj["maxCS"] = std::to_string(f.codingMeta.maxChunkSize);
-    vfmj["codingStateS"] = std::to_string(f.codingMeta.codingStateSize);
-    vfmj["codingState"] = std::string(reinterpret_cast<char *>(codingState));
-    vfmj["numS"] = std::to_string(f.numStripes);
-    vfmj["ver"] = std::to_string(f.version);
-    vfmj["ctime"] = std::to_string(f.ctime);
-    vfmj["atime"] = std::to_string(f.atime);
-    vfmj["mtime"] = std::to_string(f.mtime);
-    vfmj["tctime"] = std::to_string(f.tctime);
-    vfmj["md5"] = std::string(f.md5, f.md5 + MD5_DIGEST_LENGTH);
-    vfmj["sg_size"] = std::to_string(f.staged.size);
-    vfmj["sg_sc"] = f.staged.storageClass;
-    vfmj["sg_cs"] = std::to_string(f.staged.codingMeta.coding);
-    vfmj["sg_n"] = std::to_string(f.staged.codingMeta.n);
-    vfmj["sg_k"] = std::to_string(f.staged.codingMeta.k);
-    vfmj["sg_f"] = std::to_string(f.staged.codingMeta.f);
-    vfmj["sg_maxCS"] = std::to_string(f.staged.codingMeta.maxChunkSize);
-    vfmj["sg_mtime"] = std::to_string(f.staged.mtime);
-    vfmj["dm"] = std::to_string(deleted);
-    vfmj["numUB"] = std::to_string(numUniqueBlocks);
-    vfmj["numDB"] = std::to_string(numDuplicateBlocks);
+    nlohmann::json *verFmjPtr = new nlohmann::json();
+    auto &verFmj = *verFmjPtr;
+    verFmj["name"] = std::string(f.name, f.nameLength);
+    verFmj["uuid"] = boost::uuids::to_string(f.uuid);
+    verFmj["size"] = std::to_string(f.size);
+    verFmj["numC"] = std::to_string(f.numChunks);
+    verFmj["sc"] = f.storageClass;
+    verFmj["cs"] = std::string(1, f.codingMeta.coding);
+    verFmj["n"] = std::to_string(f.codingMeta.n);
+    verFmj["k"] = std::to_string(f.codingMeta.k);
+    verFmj["f"] = std::to_string(f.codingMeta.f);
+    verFmj["maxCS"] = std::to_string(f.codingMeta.maxChunkSize);
+    verFmj["codingStateS"] = std::to_string(f.codingMeta.codingStateSize);
+    verFmj["codingState"] = std::string(reinterpret_cast<char *>(codingState));
+    verFmj["numS"] = std::to_string(f.numStripes);
+    verFmj["ver"] = std::to_string(f.version);
+    verFmj["ctime"] = std::to_string(f.ctime);
+    verFmj["atime"] = std::to_string(f.atime);
+    verFmj["mtime"] = std::to_string(f.mtime);
+    verFmj["tctime"] = std::to_string(f.tctime);
+    verFmj["md5"] = std::string(f.md5, MD5_DIGEST_LENGTH);
+    verFmj["sg_size"] = std::to_string(f.staged.size);
+    verFmj["sg_sc"] = f.staged.storageClass;
+    verFmj["sg_cs"] = std::to_string(f.staged.codingMeta.coding);
+    verFmj["sg_n"] = std::to_string(f.staged.codingMeta.n);
+    verFmj["sg_k"] = std::to_string(f.staged.codingMeta.k);
+    verFmj["sg_f"] = std::to_string(f.staged.codingMeta.f);
+    verFmj["sg_maxCS"] = std::to_string(f.staged.codingMeta.maxChunkSize);
+    verFmj["sg_mtime"] = std::to_string(f.staged.mtime);
+    verFmj["dm"] = std::to_string(deleted);
+    verFmj["numUB"] = std::to_string(numUniqueBlocks);
+    verFmj["numDB"] = std::to_string(numDuplicateBlocks);
 
     // container ids
     char chunkName[FDB_MAX_KEY_SIZE];
@@ -224,13 +222,13 @@ bool FDBMetaStore::putMeta(const File &f)
     {
         genChunkKeyPrefix(f.chunks[i].getChunkId(), chunkName);
         std::string cidKey = std::string(chunkName) + std::string("-cid");
-        vfmj[cidKey.c_str()] = std::to_string(f.containerIds[i]);
+        verFmj[cidKey.c_str()] = std::to_string(f.containerIds[i]);
         std::string csizeKey = std::string(chunkName) + std::string("-size");
-        vfmj[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
+        verFmj[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
         std::string cmd5Key = std::string(chunkName) + std::string("-md5");
-        vfmj[cmd5Key.c_str()] = std::string(f.chunks[i].md5, f.chunks[i].md5 + MD5_DIGEST_LENGTH);
+        verFmj[cmd5Key.c_str()] = std::string(f.chunks[i].md5, MD5_DIGEST_LENGTH);
         std::string cmd5Bad = std::string(chunkName) + std::string("-bad");
-        vfmj[cmd5Bad.c_str()] = std::to_string((f.chunksCorrupted ? f.chunksCorrupted[i] : 0));
+        verFmj[cmd5Bad.c_str()] = std::to_string((f.chunksCorrupted ? f.chunksCorrupted[i] : 0));
     }
 
     // deduplication fingerprints and block mapping
@@ -241,7 +239,7 @@ bool FDBMetaStore::putMeta(const File &f)
         genBlockKey(blockId, blockName, /* is unique */ true);
         std::string fp = it->second.first.get();
         // logical offset, length, fingerprint, physical offset
-        vfmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data() + std::to_string(it->second.second);
+        verFmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data() + std::to_string(it->second.second);
     }
     blockId = 0;
     for (auto it = f.duplicateBlocks.begin(); it != f.duplicateBlocks.end(); it++, blockId++)
@@ -249,107 +247,92 @@ bool FDBMetaStore::putMeta(const File &f)
         genBlockKey(blockId, blockName, /* is unique */ false);
         std::string fp = it->second.get();
         // logical offset, length, fingerprint
-        vfmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
+        verFmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
     }
 
-    // serialize json to string and store in FDB
-    std::string vfmjStr = vfmj.dump();
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
-    delete vfmjptr;
+    std::string verFmjStr = verFmj.dump();
+    // Store versioned file meta into FDB
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(verFmjStr.c_str()), verFmjStr.size());
+    delete verFmjPtr;
 
     // add uuid-to-file-name maping
-    char fidKey[FDB_MAX_KEY_SIZE + 64];
-    if (genFileUuidKey(f.namespaceId, f.uuid, fidKey) == false)
+    char fUUIDKey[FDB_MAX_KEY_SIZE + 64];
+    if (genFileUuidKey(f.namespaceId, f.uuid, fUUIDKey) == false)
     {
         LOG(WARNING) << "File uuid " << boost::uuids::to_string(f.uuid) << " is too long to generate a reverse key mapping";
     }
     else
     {
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fidKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), f.nameLength);
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fUUIDKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), f.nameLength);
     }
 
-    // update the corresponding directory prefix set of this file
+    // add filename to file Prefix Set
     std::string filePrefix = getFilePrefix(fileKey);
-    FDBFuture *filePrefixFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), 0); // not set snapshot
-    exitOnError(fdb_future_block_until_ready(filePrefixFut));
-    fdb_bool_t filePrefixExist;
-    const uint8_t *filePrefixRaw = NULL;
-    int filePrefixRawLength;
-    exitOnError(fdb_future_get_value(filePrefixFut, &filePrefixExist, &filePrefixRaw, &filePrefixRawLength));
-    fdb_future_destroy(filePrefixFut);
-    filePrefixFut = nullptr;
-    if (!filePrefixExist)
-    {
-        // create the list and add to the list
-        nlohmann::json *dljptr = new nlohmann::json();
-        auto &dlj = *dljptr;
-        dlj["list"] = nlohmann::json::array();
-        dlj["list"].push_back(fileKey);
-        std::string dljstr = dlj.dump();
-        delete dljptr;
+    std::string fPrefixListStr;
+    bool fPrefixSetExist = getValueInTX(tx, filePrefix, fPrefixListStr);
 
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(dljstr.c_str()), dljstr.size());
+    nlohmann::json *fpljPtr = new nlohmann::json();
+    auto &fplj = *fpljPtr;
+    if (fPrefixSetExist == false)
+    {
+        // create the set and add the fileKey
+        fplj["list"] = nlohmann::json::array();
+        fplj["list"].push_back(fileKey);
     }
     else
     {
-        std::string dljstr(reinterpret_cast<const char *>(filePrefixRaw), filePrefixRawLength);
         // add fileKey to the list (avoid duplication)
-        nlohmann::json *dljptr = new nlohmann::json();
-        auto &dlj = *dljptr;
-        dlj.parse(dljstr);
-        if (dlj["list"].find(fileKey) == dlj["list"].end())
+        if (parseStrToJSONObj(fPrefixListStr, fplj) == false)
         {
-            dlj["list"].push_back(fileKey);
+            exit(1);
         }
-        std::string dljstr = dlj.dump();
-        delete dljptr;
-
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(dljstr.c_str()), dljstr.size());
+        if (fplj["list"].find(fileKey) == fplj["list"].end())
+        {
+            fplj["list"].push_back(fileKey);
+        }
     }
+    std::string fpljStr = fplj.dump();
+    delete fpljPtr;
 
-    // update the global directory prefix set of this file
-    FDBFuture *GDLFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), 0); // not set snapshot
-    exitOnError(fdb_future_block_until_ready(GDLFut));
-    fdb_bool_t GDLExist;
-    const uint8_t *GDLRaw = NULL;
-    int GDLRawLength;
-    exitOnError(fdb_future_get_value(GDLFut, &GDLExist, &GDLRaw, &GDLRawLength));
-    fdb_future_destroy(GDLFut);
-    GDLFut = nullptr;
-    if (!GDLExist)
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(fpljStr.c_str()), fpljStr.size());
+
+    // Update the directory list of
+    std::string dirListStr;
+    bool dirListExist = getValueInTX(tx, std::string(FDB_DIR_LIST_KEY), dirListStr);
+
+    nlohmann::json *dljPtr = new nlohmann::json();
+    auto &dlj = *dljPtr;
+
+    if (dirListExist == false)
     {
-        // create the list and add filePrefix to the list
-        nlohmann::json *gdljptr = new nlohmann::json();
-        auto &gdlj = *gdljptr;
-        gdlj["list"] = nlohmann::json::array();
-        gdlj["list"].push_back(filePrefix.c_str());
-        std::string gdljstr = gdlj.dump();
-        delete gdljptr;
-
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(gdljstr.c_str()), gdljstr.size());
+        // create the list and add file prefix to the list
+        dlj["list"] = nlohmann::json::array();
+        dlj["list"].push_back(filePrefix.c_str());
     }
     else
     {
-        std::string gdljstr(reinterpret_cast<const char *>(GDLRaw), GDLRawLength);
         // add filePrefix to the list (avoid duplication)
-        nlohmann::json *gdljptr = new nlohmann::json();
-        auto &gdlj = *gdljptr;
-        gdlj.parse(gdljstr);
-        if (gdlj["list"].find(filePrefix) == gdlj["list"].end())
+        if (parseStrToJSONObj(dirListStr, dlj) == false)
         {
-            gdlj["list"].push_back(filePrefix);
+            exit(1);
         }
-        std::string gdljstr = gdlj.dump();
-        delete gdljptr;
-
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(gdljstr.c_str()), gdljstr.size());
     }
+
+    if (dlj["list"].find(filePrefix) == dlj["list"].end())
+    {
+        dlj["list"].push_back(filePrefix);
+    }
+
+    std::string dljStr = dlj.dump();
+    delete dljPtr;
+
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(dljStr.c_str()), dljStr.size());
 
     // commit transaction
-    FDBFuture *fcmt = fdb_transaction_commit(tx);
-    exitOnError(fdb_future_block_until_ready(fcmt));
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
 
-    fdb_future_destroy(fcmt);
+    fdb_future_destroy(cmt);
 
     LOG(INFO) << "FDBMetaStore:: putMeta() finished";
 
