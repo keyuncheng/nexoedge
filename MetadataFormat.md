@@ -34,6 +34,7 @@
 * Add lock_guard()
 * Generate FileKey
 * Generate FilePrefix from FileKey
+* Create FDB transaction
 * Obtain current file version (if it exists in the metastore)
     * Set to curVersion
 * Now assume versioning is enabled
@@ -228,11 +229,11 @@
 
 #### putMeta()
 
-* Filename (assume filename is "abc")
+* Filename
 * genFileKey(File) -> filename = "namespaceId_abc"
 * genVersionedFileKey(File) -> filename = "namespaceId_abc_ver"
-* genFileVersionListKey(File) -> filename = verListKey (the same as
-    Redis), currently not used
+* No need to provide another version list: genFileVersionListKey(File) -> filename = verListKey (the
+  same as Redis)
 * Create record for filename
     * Key: filename
     * Value: JSON string {}
@@ -257,3 +258,15 @@
 
 * The flow of renameMeta() is very similar to Redis-based metastore; will
   update details after impl
+
+#### genFileKey()
+
+* The same as Redis
+
+* FileKey format: namespaceId_filename
+
+#### genVersionedFileKey()
+
+* The same as Redis
+
+* Versioned FileKey format: "/namespace_filename'\n'version"

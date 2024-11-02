@@ -13,6 +13,7 @@
 
 // change defs's prefix to FDB_
 #define FDB_NUM_RESERVED_SYSTEM_KEYS (8)
+#define FDB_COMMON_KEY_PREFIX "//sncc"
 #define FDB_FILE_LOCK_KEY "//snccFLock"
 #define FDB_FILE_PIN_STAGED_KEY "//snccFPinStaged"
 #define FDB_FILE_REPAIR_KEY "//snccFRepair"
@@ -33,24 +34,28 @@ FDBMetaStore::FDBMetaStore()
     // didn't use for now
     Config &config = Config::getInstance();
 
-    LOG(INFO) << "FDBMetaStore:: MetaStoreType: " << config.getProxyMetaStoreType();
+    LOG(INFO) << "FDBMetaStore::FDBMetaStore() MetaStoreType: " << config.getProxyMetaStoreType();
 
     // select API version
     fdb_select_api_version(FDB_API_VERSION);
-    LOG(INFO) << "creating FDB Client connection, selected API version: " << FDB_API_VERSION;
+    LOG(INFO) << "FDBMetaStore::FDBMetaStore() creating FDB Client connection, selected API version: " << FDB_API_VERSION;
 
-    // setup network and connect to database
+    // init network
     exitOnError(fdb_setup_network());
     if (pthread_create(&_fdb_network_thread, NULL, FDBMetaStore::runNetwork, NULL))
     {
-        LOG(ERROR) << "FDBMetaStore:: failed to create network thread";
+        LOG(ERROR) << "FDBMetaStore::FDBMetaStore() failed to create network thread";
         exit(1);
     }
+
+    // init database
     _db = getDatabase(_FDBClusterFile);
 
+    // TODO: check the params here
     _taskScanIt = "0";
     _endOfPendingWriteSet = true;
-    LOG(INFO) << "FoundationDB MetaStore connection init; clusterFile: " << _FDBClusterFile;
+
+    LOG(INFO) << "FDBMetaStore::FDBMetaStore() MetaStore initialized, clusterFile: " << _FDBClusterFile;
 }
 
 FDBMetaStore::~FDBMetaStore()
@@ -68,113 +73,112 @@ bool FDBMetaStore::putMeta(const File &f)
 
     // file key (format: namespace_filename)
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
-    // versioned file key (format: namespace_filename_version)
+    // versioned file key (format: namespace_filename_f.version)
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
-    // // version list (format: vlnamespace_filename) (currently removed)
-    // int vlnameLength = genFileVersionListKey(f.namespaceId, f.name, f.nameLength, verListKey);
 
-    // pre-create a file version summary
+    // Create a file version summary (TODO: check if needed)
+    // format: "size mtime md5 isDeleted numChunks" (no version specified)
     std::string fvsummary;
-    fvsummary.append(std::to_string(f.size).append(" "));                            // file size
-    fvsummary.append(std::to_string(f.mtime).append(" "));                           // modify time
-    fvsummary.append(std::string(f.md5, f.md5 + MD5_DIGEST_LENGTH).append(" "));     // md5
-    fvsummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" ")); // is deleted
-    fvsummary.append(std::to_string(f.numChunks));                                   // number of chunks
+    fvsummary.append(std::to_string(f.size).append(" "));
+    fvsummary.append(std::to_string(f.mtime).append(" "));
+    fvsummary.append(std::string(f.md5, MD5_DIGEST_LENGTH).append(" "));
+    fvsummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" "));
+    fvsummary.append(std::to_string(f.numChunks)); // number of chunks
 
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
-    // check whether the file metadata exists
-    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0 /** not set snapshot */);
-    exitOnError(fdb_future_block_until_ready(fileMetaFut));
-    fdb_bool_t fileMetaExist;
-    const uint8_t *fileMetaRaw = NULL;
-    int fileMetaRawLength;
-    exitOnError(fdb_future_get_value(fileMetaFut, &fileMetaExist, &fileMetaRaw, &fileMetaRawLength));
-    fdb_future_destroy(fileMetaFut);
-    fileMetaFut = nullptr;
+    // Step 1: check whether the file metadata exists
+    bool fileMetaExist = false;
+    std::string fileMetaStr;
+    fileMetaExist = getValueInTX(tx, std::string(fileKey), fileMetaStr);
 
-    // current metadata format: key: filename; value: {"verList": [v0, v1, v2,
-    // ...]}; for non-versioned system, verList only stores v0
+    /**
+     * @brief File metadata format
+     * @Key fileKey
+     * @Value {"verId": [0, 1, 2, ...], "verName": [name0, name1, name2, ...],
+     * verSummary: [summary0, summary1, summary2, ...]}
+     *
+     * @Note For non-versioned system, verList only stores v0
+     */
     nlohmann::json *fmjptr = new nlohmann::json();
     auto &fmj = *fmjptr;
 
     if (fileMetaExist == false)
-    {
-        // init the version list with the new version
-        fmj["verList"] = nlohmann::json::array();
-        fmj["verList"].push_back(verFileKey);
-        fmj["verNum"] = nlohmann::json::array();
-        fmj["verNum"].push_back(f.version);
+    { // No file meta: init the new version
+        // version id: (TODO: check if f.version could be -1)
+        fmj["verId"] = nlohmann::json::array();
+        fmj["verId"].push_back(f.version);
+        // version name
+        fmj["verName"] = nlohmann::json::array();
+        fmj["verName"].push_back(verFileKey);
+        // version summary
         fmj["verSummary"] = nlohmann::json::array();
         fmj["verSummary"].push_back(fvsummary);
     }
     else
-    {
-        // parse fileMeta as JSON object
-        try
+    { // File meta exists
+        // parse fileMeta as JSON
+        if (parseStrToJSONObj(fileMetaStr, fmj) == false)
         {
-            std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
-            fmj = nlohmann::json::parse(filMetaRawStr);
-        }
-        catch (std::exception e)
-        {
-            LOG(ERROR) << "FDBMetaStore::putMeta() Error parsing JSON string: " << e.what();
             exit(1);
         }
 
-        // check if versioning is enabled
+        // check whether versioning is enabled
         bool keepVersion = !config.overwriteFiles();
         if (keepVersion == false)
         {
             // remove all previous versions (verFilekey) in FDB
-            for (auto prevVerFileKey : fmj["verList"])
+            for (auto prevVerFileKey : fmj["verName"])
             {
                 fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(prevVerFileKey.c_str()), prevVerFileKey.size());
             }
 
-            // only keep the latest version
-            fmj["verList"].clear();
-            fmj["verList"].push_back(verFileKey);
-            fmj["verNum"].clear();
-            fmj["verNum"].push_back(f.version);
+            // only keep the input version
+            fmj["verId"].clear();
+            fmj["verId"].push_back(verFileKey);
+            fmj["verName"].clear();
+            fmj["verName"].push_back(f.version);
             fmj["verSummary"].clear();
             fmj["verSummary"].push_back(fvsummary);
         }
         else
         {
-            // if the version is not stored in the list, insert the version
+            // If the version is not stored in the list, insert the
+            // version
             if (fmj["verList"].find(verFileKey) == fmj["verList"].end())
             {
-                bool found_pos = false;
-                for (int i = 0; i < fmj["verNum"].size(); i++)
+                int pos;
+                for (pos = 0; pos < fmj["verId"].size(); pos++)
                 {
-                    if (f.version < fmj["verNum"].get<int>(i))
+                    // find position to insert (in ascending order)
+                    if (f.version < fmj["verId"].get<int>(i))
                     {
-                        found_pos = true;
-                        fmj["verList"].insert(fmj["verList"].begin() + i, verFileKey);
-                        fmj["verNum"].insert(fmj["verNum"].begin() + i, f.version);
-                        fmj["verSummary"].insert(fmj["verSummary"].begin() + i, fvsummary);
                         break;
                     }
                 }
-                if (found_pos == false)
-                {
-                    fmj["verList"].push_back(verFileKey);
-                    fmj["verNum"].push_back(f.version);
-                    fmj["verSummary"].push_back(fvsummary);
-                }
+
+                fmj["verId"].insert(fmj["verId"].begin() + pos, f.version);
+                fmj["verName"].insert(fmj["verName"].begin() + pos, verFileKey);
+                fmj["verSummary"].insert(fmj["verSummary"].begin() + pos, fvsummary);
             }
         }
     }
 
-    // serialize json to string and store in FDB
+    // Store file meta into FDB
     std::string fmjStr = fmj.dump();
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
     delete fmjptr;
 
-    // create metadata for current file version, format: serialized JSON string
+    // TODO: resume here
+    /**
+     * @brief Versioned file metadata format
+     * @Key verFileKey
+     * @Value JSON string
+     *
+     */
+    // Create metadata for the current file version
     bool isEmptyFile = f.size == 0;
     unsigned char *codingState = isEmptyFile || f.codingMeta.codingState == NULL ? (unsigned char *)"" : f.codingMeta.codingState;
     int deleted = isEmptyFile ? f.isDeleted : 0;
@@ -1128,7 +1132,6 @@ void FDBMetaStore::exitOnError(fdb_error_t err)
         LOG(ERROR) << "FoundationDB MetaStore error: " << fdb_get_error(err);
         exit(1);
     }
-    return;
 }
 
 void *FDBMetaStore::runNetwork(void *args)
@@ -1200,6 +1203,55 @@ void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
     LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
 
     return;
+}
+
+bool FDBMetaStore::getValueInTX(const FDBTransaction *tx, const std::string &key, std::string &value)
+{
+    if (tx == NULL)
+    {
+        LOG(ERROR) << "FDBMetaStore:: getValueInTX() invalid Transaction";
+        return false;
+    }
+
+    // Create future
+    FDBFuture *getFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), 0); // not set snapshot
+    exitOnError(fdb_future_block_until_ready(getFut));
+
+    fdb_bool_t isKeyPresent;
+    const uint8_t *valueRaw = NULL;
+    int valueRawLength;
+
+    // block future and get raw value
+    exitOnError(fdb_future_get_value(getFut, &isKeyPresent, &valueRaw, &valueRawLength));
+    fdb_future_destroy(getFut);
+    getFut = nullptr;
+
+    // check whether the key presents
+    if (isKeyPresent)
+    {
+        value = std::string(reinterpret_cast<const char *>(valueRaw), valueRawLength);
+        LOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found: value " << value;
+        return true;
+    }
+    else
+    {
+        LOG(INFO) << "FDBMetaStore:: getValueInTX() key " << key << "not found";
+        return false;
+    }
+}
+
+bool FDBMetaStore::parseStrToJSONObj(const std::string &str, nlohmann::json &j)
+{
+    try
+    {
+        j = nlohmann::json::parse(str);
+    }
+    catch (std::exception e)
+    {
+        LOG(ERROR) << "FDBMetaStore::parseStrToJSONObj() Error parsing JSON string: " << e.what();
+        return false;
+    }
+    return true;
 }
 
 bool FDBMetaStore::getFileName(char fileUuidKey[], File &f)

@@ -180,8 +180,37 @@ private:
     void exitOnError(fdb_error_t err);
     static void *runNetwork(void *args);
     FDBDatabase *getDatabase(std::string clusterFile);
-    std::pair<bool, std::string> getValue(std::string key);
-    void setValueAndCommit(std::sgetring key, std::string value);
+    std::pair<bool, const> getValue(std::string key);
+    void setValueAndCommit(std::string key, std::string value);
+    // FDB operations in Transaction
+
+    /**
+     * @brief Get value from FDB within the Transaction Context
+     *
+     * @param tx transaction
+     * @param key key
+     * @param value value
+     * @return bool whether value exists
+     */
+    bool getValueInTX(const FDBTransaction *tx, const std::string &key, std::string &value);
+
+    /**
+     * @brief parse raw string to JSON object
+     *
+     * @param str
+     * @param j
+     * @return bool whether the parsing is successful
+     */
+    bool parseStrToJSONObj(const std::string &str, nlohmann::json &j);
+
+    /**
+     * @brief Set value into FDB within the Transaction Context
+     *
+     * @param tx transaction
+     * @param key key
+     * @param value value
+     */
+    void setValueInTX(const FDBTransaction *tx, const std::string &key, std::string &value);
 
     // helper functions (mostly copied from RedisMetaStore)
     bool markFileRepairStatus(const File &file, bool needsRepair);
