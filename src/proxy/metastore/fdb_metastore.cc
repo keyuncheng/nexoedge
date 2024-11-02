@@ -69,29 +69,27 @@ FDBMetaStore::~FDBMetaStore()
 bool FDBMetaStore::putMeta(const File &f)
 {
     std::lock_guard<std::mutex> lk(_lock);
-    char fileKey[PATH_MAX], verFileKey[PATH_MAX], verListKey[PATH_MAX];
+    char fileKey[PATH_MAX], verFileKey[PATH_MAX];
 
-    // file key (format: namespace_filename)
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
-    // versioned file key (format: namespace_filename_f.version)
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
 
-    // Create a file version summary (TODO: check if needed)
-    // format: "size mtime md5 isDeleted numChunks" (no version specified)
-    std::string fvsummary;
-    fvsummary.append(std::to_string(f.size).append(" "));
-    fvsummary.append(std::to_string(f.mtime).append(" "));
-    fvsummary.append(std::string(f.md5, MD5_DIGEST_LENGTH).append(" "));
-    fvsummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" "));
-    fvsummary.append(std::to_string(f.numChunks)); // number of chunks
+    // create a file version summary
+    // format: "size mtime md5 isDeleted numChunks"
+    std::string fVerSummary;
+    fVerSummary.append(std::to_string(f.size).append(" "));
+    fVerSummary.append(std::to_string(f.mtime).append(" "));
+    fVerSummary.append(std::string(f.md5, MD5_DIGEST_LENGTH).append(" "));
+    fVerSummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" "));
+    fVerSummary.append(std::to_string(f.numChunks));
 
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
-    // Step 1: check whether the file metadata exists
+    // check whether the file metadata exists
     std::string fileMetaStr;
-    bool fileMetaExist = getValueInTX(tx, std::string(fileKey), fileMetaStr);
+    bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
 
     /**
      * @brief File metadata format
@@ -106,7 +104,7 @@ bool FDBMetaStore::putMeta(const File &f)
 
     if (fileMetaExist == false)
     { // No file meta: init the new version
-        // version id: (TODO: check if f.version could be -1)
+        // version id: (TODO: check correctness when f.version == -1)
         fmj["verId"] = nlohmann::json::array();
         fmj["verId"].push_back(f.version);
         // version name
@@ -114,11 +112,10 @@ bool FDBMetaStore::putMeta(const File &f)
         fmj["verName"].push_back(verFileKey);
         // version summary
         fmj["verSummary"] = nlohmann::json::array();
-        fmj["verSummary"].push_back(fvsummary);
+        fmj["verSummary"].push_back(fVerSummary);
     }
     else
     { // File meta exists
-        // parse fileMeta as JSON
         if (parseStrToJSONObj(fileMetaStr, fmj) == false)
         {
             exit(1);
@@ -128,39 +125,36 @@ bool FDBMetaStore::putMeta(const File &f)
         bool keepVersion = !config.overwriteFiles();
         if (keepVersion == false)
         {
-            // remove all previous versions (verFilekey) in FDB
+            // clear all previous versions in FDB
             for (auto prevVerFileKey : fmj["verName"])
             {
                 fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(prevVerFileKey.c_str()), prevVerFileKey.size());
             }
 
-            // only keep the input version
+            // only keep the input file version
             fmj["verId"].clear();
-            fmj["verId"].push_back(verFileKey);
+            fmj["verId"].push_back(f.version);
             fmj["verName"].clear();
-            fmj["verName"].push_back(f.version);
+            fmj["verName"].push_back(verFileKey);
             fmj["verSummary"].clear();
-            fmj["verSummary"].push_back(fvsummary);
+            fmj["verSummary"].push_back(fVerSummary);
         }
         else
         {
-            // If the version is not stored in the list, insert the
-            // version
+            // if the version is not stored, insert it in ascending order
             if (fmj["verId"].find(verFileKey) == fmj["verId"].end())
             {
                 int pos;
                 for (pos = 0; pos < fmj["verId"].size(); pos++)
                 {
-                    // find position to insert (in ascending order)
                     if (f.version < fmj["verId"].get<int>(i))
                     {
                         break;
                     }
                 }
-
                 fmj["verId"].insert(fmj["verId"].begin() + pos, f.version);
                 fmj["verName"].insert(fmj["verName"].begin() + pos, verFileKey);
-                fmj["verSummary"].insert(fmj["verSummary"].begin() + pos, fvsummary);
+                fmj["verSummary"].insert(fmj["verSummary"].begin() + pos, fVerSummary);
             }
         }
     }
@@ -296,7 +290,7 @@ bool FDBMetaStore::putMeta(const File &f)
 
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(fpljStr.c_str()), fpljStr.size());
 
-    // Update the directory list of
+    // Update the directory list
     std::string dirListStr;
     bool dirListExist = getValueInTX(tx, std::string(FDB_DIR_LIST_KEY), dirListStr);
 
@@ -316,11 +310,10 @@ bool FDBMetaStore::putMeta(const File &f)
         {
             exit(1);
         }
-    }
-
-    if (dlj["list"].find(filePrefix) == dlj["list"].end())
-    {
-        dlj["list"].push_back(filePrefix);
+        if (dlj["list"].find(filePrefix) == dlj["list"].end())
+        {
+            dlj["list"].push_back(filePrefix);
+        }
     }
 
     std::string dljStr = dlj.dump();
