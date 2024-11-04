@@ -91,14 +91,6 @@ bool FDBMetaStore::putMeta(const File &f)
     std::string fileMetaStr;
     bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
 
-    /**
-     * @brief File metadata format
-     * @Key fileKey
-     * @Value {"verId": [0, 1, 2, ...], "verName": [name0, name1, name2, ...],
-     * verSummary: [summary0, summary1, summary2, ...]}
-     *
-     * @Note For non-versioned system, verList only stores v0
-     */
     nlohmann::json *fmjPtr = new nlohmann::json();
     auto &fmj = *fmjPtr;
 
@@ -335,11 +327,12 @@ bool FDBMetaStore::putMeta(const File &f)
 bool FDBMetaStore::getMeta(File &f, int getBlocks)
 {
     std::lock_guard<std::mutex> lk(_lock);
-    char fileKey[PATH_MAX];
+    char fileKey[PATH_MAX], verFileKey[PATH_MAX];
 
-    // file key (format: namespace_filename)
+    // file key
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
-    // versioned file key (format: namespace_filename_version)
+
+    // versioned file key
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
 
     // create transaction
@@ -347,140 +340,98 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
     // check whether the file metadata exists
-    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0 /** not set snapshot */);
-    exitOnError(fdb_future_block_until_ready(fileMetaFut));
-    fdb_bool_t fileMetaExist;
-    const uint8_t *fileMetaRaw = NULL;
-    int fileMetaRawLength;
-    exitOnError(fdb_future_get_value(fileMetaFut, &fileMetaExist, &fileMetaRaw, &fileMetaRawLength));
-    fdb_future_destroy(fileMetaFut);
-    fileMetaFut = nullptr;
-
-    nlohmann::json *fmjptr = new nlohmann::json();
-    auto &fmj = *fmjptr;
+    std::string fileMetaStr;
+    bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
 
     if (fileMetaExist == false)
     { // file metadata not exist: report and return
         LOG(WARNING) << "FDBMetaStore::putMeta() failed to get metadata for file " << f.name;
 
-        // commit transaction and return
-        delete fmjptr;
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
         return false;
     }
-    else
+
+    // parse fileMeta as JSON object
+    nlohmann::json *fmjPtr = new nlohmann::json();
+    auto &fmj = *fmjPtr;
+    if (parseStrToJSONObj(fileMetaStr, fmj) == false)
     {
-        // parse fileMeta as JSON object
-        try
-        {
-            std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
-            fmj = nlohmann::json::parse(filMetaRawStr);
-        }
-        catch (std::exception e)
-        {
-            LOG(ERROR) << "FDBMetaStore::getMeta() Error parsing JSON string: " << e.what();
-            exit(1);
-        }
+        exit(1);
     }
 
-    // For non-versioned file: get the only version; for versioned file: get
-    // metadata of f.version
     if (f.version == -1)
-    { // non-versioned file
-        // update verFileKey as the only element in verList
-        memcpy(verFileKey, fmj["verList"][0].get<std::string>().c_str(), fmj["verList"][0].get<std::string>().size());
+    { // version not specified: retrieved the latest version
+        std::string lastVerFileKey = fmj["verName"].back().get<std::string>();
+        memcpy(verFileKey, lastVerFileKey.c_str(), lastVerFileKey.size());
     }
     else
-    { // versioned file: make sure that the current version exists in the file metadata
-        if (fmj["verList"].find(verFileKey) == fmj["verList"].end())
+    { // versioned file
+        // check whether the file version exists
+        if (fmj["verName"].find(verFileKey) == fmj["verName"].end())
         {
-            LOG(WARNING) << "FDBMetaStore::getMeta() failed to find version " << f.version << " for file " << f.name;
+            LOG(WARNING) << "FDBMetaStore::getMeta() file version not exists, file: " << f.name << ", version: " << f.version;
 
-            // commit transaction and return
-            delete fmjptr;
-            FDBFuture *fcmt = fdb_transaction_commit(tx);
-            exitOnError(fdb_future_block_until_ready(fcmt));
-            fdb_future_destroy(fcmt);
+            // commit transaction
+            delete fmjPtr;
+            FDBFuture *cmt = fdb_transaction_commit(tx);
+            exitOnError(fdb_future_block_until_ready(cmt));
+            fdb_future_destroy(cmt);
 
             return false;
         }
     }
-    delete fmjptr;
+    delete fmjPtr;
 
     size_t numUniqueBlocks = 0, numDuplicateBlocks = 0;
 
     // find metadata for current file version
-    FDBFuture *verFileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, 0 /** not set snapshot */);
-    exitOnError(fdb_future_block_until_ready(verFileMetaFut));
-    fdb_bool_t verFileMetaExist;
-    const uint8_t *verFileMetaRaw = NULL;
-    int verFileMetaRawLength;
-    exitOnError(fdb_future_get_value(verFileMetaFut, &verFileMetaExist, &verFileMetaRaw, &verFileMetaRawLength));
-    fdb_future_destroy(verFileMetaFut);
-    verFileMetaFut = nullptr;
-
-    nlohmann::json *vfmjptr = new nlohmann::json();
-    auto &vfmj = *vfmjptr;
-
+    std::string verFmjStr;
+    bool verFmjExist = getValueInTX(tx, verFileKey, verFmjStr);
     if (verFileMetaExist == false)
-    { // versioned file metadata not exist: report and return
-        LOG(WARNING) << "FDBMetaStore::getMeta() failed to get versioned metadata for file " << f.name;
-
-        // commit transaction and return
-        delete vfmjptr;
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
-
-        return false;
-    }
-    else
     {
-        // parse fileMeta as JSON object
-        try
-        {
-            std::string verFileMetaRawStr(reinterpret_cast<const char *>(verFileMetaRaw));
-            vfmj = nlohmann::json::parse(verFileMetaRawStr);
-        }
-        catch (std::exception e)
-        {
-            LOG(ERROR) << "FDBMetaStore::getMeta() Error parsing JSON string: " << e.what();
-            exit(1);
-        }
+        LOG(ERROR) << "FDBMetaStore::getMeta() failed to find version in MetaStore, file: " << f.name << ", version: " << f.version;
+        exit(1);
     }
-    delete vfmjptr;
+
+    nlohmann::json *verFmjPtr = new nlohmann::json();
+    auto &verFmj = *verFmjPtr;
+    if (parseStrToJSONObj(verFmjStr, verFmj) == false)
+    {
+        exit(1);
+    }
 
     // parse fields
-    f.size = std::stoull(vfmj["size"].get<std::string>());
-    f.numChunks = std::stoi(vfmj["numC"].get<std::string>());
-    f.numStripes = std::stoi(vfmj["numS"].get<std::string>());
-    std::string retrievedUUID = vfmj["uuid"].get < std::string().c_str();
+    f.size = verFmj["size"].get<unsigned long>();
+    f.numChunks = verFmj["numC"].get<int>();
+    f.numStripes = verFmj["numS"].get<int>();
+    std::string retrievedUUID = verFmj["uuid"].get<std::string>();
     if (f.setUUID(retrievedUUID) == false)
     {
-        LOG(WARNING) << "FDBMetaStore::getMeta() invalid UUID in metadata: " << retrievedUUID;
+        LOG(WARNING) << "FDBMetaStore::getMeta() invalid UUID: " << retrievedUUID;
 
         // commit transaction and return
-        delete vfmjptr;
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
+        delete verFmjPtr;
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
         return false;
     }
 
-    f.storageClass = vfmj["sc"].get<std::string>().c_str();
-    f.codingMeta.coding = vfmj["cs"].get < std::string().c_str()[0];
-    f.codingMeta.n = std::stoi(vfmj["n"].get<std::string>());
-    f.codingMeta.k = std::stoi(vfmj["k"].get<std::string>());
-    f.codingMeta.f = std::stoi(vfmj["f"].get<std::string>());
-    f.codingMeta.maxChunkSize = std::stoi(vfmj["maxCS"].get<std::string>());
-    f.staged.mtime = std::stoull(vfmj["sg_mtime"].get<std::string>());
-    f.isDeleted = std::stoi(vfmj["dm"].get<std::string>());
-    f.numUniqueBlocks = std::stoi(vfmj["numUB"].get<std::string>());
-    f.numDuplicateBlocks = std::stoi(vfmj["numDB"].get<std::string>());
+    f.storageClass = verFmj["sc"].get<std::string>();
+    f.codingMeta.coding = verFmj["cs"].get<unsigned char>();
+    f.codingMeta.n = verFmj["n"].get<int>();
+    f.codingMeta.k = verFmj["k"].get<int>();
+    f.codingMeta.f = verFmj["f"].get<int>();
+    f.codingMeta.maxChunkSize = verFmj["maxCS"].get<int>();
+    f.staged.mtime = verFmj["sg_mtime"].get<time_t>();
+    // TODO: update here
+    f.isDeleted = std::stoi(verFmj["dm"].get<std::string>());
+    f.numUniqueBlocks = std::stoi(verFmj["numUB"].get<std::string>());
+    f.numDuplicateBlocks = std::stoi(verFmj["numDB"].get<std::string>());
 
     // get container ids and attributes
     if (!f.initChunksAndContainerIds())
@@ -498,10 +449,10 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         std::string cmd5Key = std::string(chunkName) + std::string("-md5");
         std::string cbadKey = std::string(chunkName) + std::string("-bad");
 
-        f.containerIds[chunkId] = std::stoi(vfmj[cidKey.c_str()].get<std::string>());
-        f.chunks[chunkId].size = std::stoi(vfmj[csizeKey.c_str()].get<std::string>());
-        f.chunks[chunkId].md5 = std::string(vfmj[cmd5Key.c_str()].get<std::string>().c_str(), MD5_DIGEST_LENGTH);
-        f.chunksCorrupted[chunkId] = std::stoi(vfmj[cbadKey.c_str()].get<std::string>()); // TODO: double check this field; make sure it's correct
+        f.containerIds[chunkId] = std::stoi(verFmj[cidKey.c_str()].get<std::string>());
+        f.chunks[chunkId].size = std::stoi(verFmj[csizeKey.c_str()].get<std::string>());
+        f.chunks[chunkId].md5 = std::string(verFmj[cmd5Key.c_str()].get<std::string>().c_str(), MD5_DIGEST_LENGTH);
+        f.chunksCorrupted[chunkId] = std::stoi(verFmj[cbadKey.c_str()].get<std::string>()); // TODO: double check this field; make sure it's correct
         f.chunks[chunkId].setId(f.namespaceId, f.uuid, chunkId);
         f.chunks[chunkId].data = 0;
         f.chunks[chunkId].freeData = true;
@@ -523,10 +474,10 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         for (size_t blockId = 0; blockId < numUniqueBlocks; blockId++)
         {
             genBlockKey(blockId, blockName, /* is unique */ true);
-            std::string blockStr = vfmj[std::string(blockName).c_str()].get<std::string>();
+            std::string blockStr = verFmj[std::string(blockName).c_str()].get<std::string>();
             loc._offset = std::stoull(blockStr.substr(pOffset, sizeof(unsigned long int)));
             loc._length = std::stoull(blockStr.substr(pOffset + sizeof(unsigned long int), sizeof(unsigned int)));
-            if (vfmj[std::string(blockName).c_str()].size() <= lengthWithFp)
+            if (verFmj[std::string(blockName).c_str()].size() <= lengthWithFp)
             {
                 fp.set(blockStr.substr(pOffset + noFpOfs, SHA256_DIGEST_LENGTH).c_str());
             }
@@ -549,12 +500,12 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         {
             genBlockKey(blockId, blockName, /* is unique */ false);
 
-            loc._offset = std::stoull(vfmj[std::string(blockName).c_str()].substr(0, sizeof(unsigned long int)));
-            loc._length = std::stoull(vfmj[std::string(blockName).c_str()].substr(sizeof(unsigned long int), sizeof(unsigned int)));
+            loc._offset = std::stoull(verFmj[std::string(blockName).c_str()].substr(0, sizeof(unsigned long int)));
+            loc._length = std::stoull(verFmj[std::string(blockName).c_str()].substr(sizeof(unsigned long int), sizeof(unsigned int)));
 
-            if (vfmj[std::string(blockName).c_str()].size() >= lengthWithFp)
+            if (verFmj[std::string(blockName).c_str()].size() >= lengthWithFp)
             {
-                fp.set(vfmj[std::string(blockName).c_str()].substr(noFpOfs, SHA256_DIGEST_LENGTH).c_str());
+                fp.set(verFmj[std::string(blockName).c_str()].substr(noFpOfs, SHA256_DIGEST_LENGTH).c_str());
             }
 
             auto followIt = f.duplicateBlocks.end(); // hint is the item after the element to insert for c++11, and before the element for c++98
@@ -563,7 +514,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     }
 
     // commit transaction and return
-    delete vfmjptr;
+    delete verFmjptr;
     FDBFuture *fcmt = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(fcmt));
     fdb_future_destroy(fcmt);
@@ -1194,7 +1145,7 @@ bool FDBMetaStore::getValueInTX(const FDBTransaction *tx, const std::string &key
     exitOnError(fdb_future_block_until_ready(getFut));
 
     fdb_bool_t isKeyPresent;
-    const uint8_t *valueRaw = NULL;
+    const uint8_t *valueRaw = nullptr;
     int valueRawLength;
 
     // block future and get raw value
@@ -1205,6 +1156,7 @@ bool FDBMetaStore::getValueInTX(const FDBTransaction *tx, const std::string &key
     // check whether the key presents
     if (isKeyPresent)
     {
+        // parse result as string
         value = std::string(reinterpret_cast<const char *>(valueRaw), valueRawLength);
         LOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found: value " << value;
         return true;

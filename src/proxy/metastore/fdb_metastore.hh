@@ -35,6 +35,14 @@ public:
     /**
      * See MetaStore::putMeta()
      **/
+    /**
+     * @brief File metadata format
+     * @Key fileKey
+     * @Value {"verId": [0, 1, 2, ...], "verName": [name0, name1, name2, ...],
+     * verSummary: [summary0, summary1, summary2, ...]}
+     *
+     * @Note For non-versioned system, verList only stores v0
+     */
     bool putMeta(const File &f);
 
     /**
