@@ -428,10 +428,9 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     f.codingMeta.f = verFmj["f"].get<int>();
     f.codingMeta.maxChunkSize = verFmj["maxCS"].get<int>();
     f.staged.mtime = verFmj["sg_mtime"].get<time_t>();
-    // TODO: update here
-    f.isDeleted = std::stoi(verFmj["dm"].get<std::string>());
-    f.numUniqueBlocks = std::stoi(verFmj["numUB"].get<std::string>());
-    f.numDuplicateBlocks = std::stoi(verFmj["numDB"].get<std::string>());
+    f.isDeleted = verFmj["dm"].get<bool>();
+    numUniqueBlocks = verFmj["numUB"].get<int>();
+    numDuplicateBlocks = verFmj["numDB"].get<int>();
 
     // get container ids and attributes
     if (!f.initChunksAndContainerIds())
@@ -464,26 +463,25 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     Fingerprint fp;
     char blockName[FDB_MAX_KEY_SIZE];
 
-    int noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
-    int hasFpOfs = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
-    int lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH + sizeof(int);
-
     if (getBlocks == 1 || getBlocks == 3)
     { // unique blocks
         int pOffset = 0;
+        int noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
+        int hasFpOfs = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
+        int lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH + sizeof(int);
         for (size_t blockId = 0; blockId < numUniqueBlocks; blockId++)
         {
             genBlockKey(blockId, blockName, /* is unique */ true);
             std::string blockStr = verFmj[std::string(blockName).c_str()].get<std::string>();
             loc._offset = std::stoull(blockStr.substr(pOffset, sizeof(unsigned long int)));
             loc._length = std::stoull(blockStr.substr(pOffset + sizeof(unsigned long int), sizeof(unsigned int)));
-            if (verFmj[std::string(blockName).c_str()].size() <= lengthWithFp)
+            if (verFmj[std::string(blockName).c_str()].size() >= lengthWithFp)
             {
-                fp.set(blockStr.substr(pOffset + noFpOfs, SHA256_DIGEST_LENGTH).c_str());
+                fp.set(blockStr.substr(pOffset + hasFpOfs, SHA256_DIGEST_LENGTH).c_str());
             }
             else
             {
-                fp.set(blockStr.substr(pOffset + hasFpOfs, SHA256_DIGEST_LENGTH).c_str());
+                fp.set(blockStr.substr(pOffset + noFpOfs, SHA256_DIGEST_LENGTH).c_str());
             }
 
             auto followIt = f.uniqueBlocks.end(); // hint is the item after the element to insert for c++11, and before the element for c++98
@@ -513,11 +511,14 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         }
     }
 
-    // commit transaction and return
-    delete verFmjptr;
-    FDBFuture *fcmt = fdb_transaction_commit(tx);
-    exitOnError(fdb_future_block_until_ready(fcmt));
-    fdb_future_destroy(fcmt);
+    // commit transaction
+    delete verFmjPtr;
+
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
+    LOG(INFO) << "FDBMetaStore::getMeta() finished";
 
     return true;
 }
