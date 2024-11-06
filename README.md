@@ -74,6 +74,10 @@ The Samba server communicates with Nexoedge via TCP/IP sockets.
 
 See the [build and installation guide](INSTALL.md) for the installation instructions.
 
+### Data Repair
+
+Nexoedge supports both proxy-side and agent-side data repair. System administrators can configure either option in the proxy configuration file.
+
 ### System Monitoring Tools
 
 #### Status Report
