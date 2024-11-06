@@ -85,7 +85,7 @@ In `proxy.ini`,
   - `background_task_check_interval`: Time between checks on background task status (in seconds)
 - `misc`: Misc
   - `zmq_thread`: Number of threads in ZeroMQ context 
-  - `repair_at_proxy`: Whether to perform data repair at the proxy (instead of an agent) when the improved repair technique applies
+  - `repair_at_proxy`: Whether to perform data repair at the proxy (instead of an agent)
   - `overwrite_files`: Whether to remove old data chunks for overwrite
   - `reuse_data_connection`: Reuse data connections for chunk transfer
   - `liveness_cache_time`: Time to cache alive liveness status (in seconds)
