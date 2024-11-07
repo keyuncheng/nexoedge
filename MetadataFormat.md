@@ -254,6 +254,14 @@
 * The flow of getMeta() is very similar to Redis-based metastore; will update
   details after impl
 
+#### deleteMeta()
+
+* The flow of deleteMeta() is very similar to Redis-based metastore; will
+  update details after impl
+
+* Difference: no need to delete the file version list; only delete the
+  versioned file key
+
 #### renameMeta()
 
 * The flow of renameMeta() is very similar to Redis-based metastore; will
