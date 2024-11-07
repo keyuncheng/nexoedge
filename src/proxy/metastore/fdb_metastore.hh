@@ -225,7 +225,6 @@ private:
     bool getFileName(char fileUuidKey[], File &f);
     int genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
     int genVersionedFileKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]);
-    int genFileVersionListKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
     bool genFileUuidKey(unsigned char namespaceId, boost::uuids::uuid uuid, char key[]);
     std::string getFilePrefix(const char name[], bool noEndingSlash = false);
     int genChunkKeyPrefix(int chunkId, char prefix[]);

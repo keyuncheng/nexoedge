@@ -525,6 +525,86 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
 bool FDBMetaStore::deleteMeta(File &f)
 {
+    std::lock_guard<std::mutex> lk(_lock);
+
+    char fileKey[PATH_MAX], verFileKey[PATH_MAX];
+
+    int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
+    int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
+
+    int versionToDelete = f.version;
+    std::string filePrefix = getFilePrefix(fileKey);
+
+    bool isVersioned = !config.overwriteFiles();
+    bool lazyDeletion = false;
+    bool ret = true;
+
+    DLOG(INFO) << "FDBMetaStore::deleteMeta() start to delete file " << f.name << ", version: " << f.version;
+
+    // versioning enabled but a version is not specified, mark as deleted
+    if ((isVersioned || lazyDeletion) && versionToDelete == -1)
+    {
+        f.isDeleted = true;
+        f.size = 0;
+        f.version = 0; // set to version 0
+        f.numChunks = 0;
+        f.numStripes = 0;
+        f.mtime = time(NULL);
+        memset(f.md5, 0, MD5_DIGEST_LENGTH);
+        ret = putMeta(f);
+        // tell the caller not to remove the data
+        f.version = -1;
+        DLOG(INFO) << "FDBMetaStore::deleteMeta() Remove the current version " << f.version << " of file " << f.name;
+        return ret;
+    }
+
+    // check existing file versions
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // check whether the file metadata exists
+    std::string fileMetaStr;
+    bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
+
+    if (fileMetaExist == false)
+    { // file metadata not exist: report and return
+        LOG(WARNING) << "FDBMetaStore::putMeta() failed to get metadata for file " << f.name;
+
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return false;
+    }
+
+    // parse fileMeta as JSON object
+    nlohmann::json *fmjPtr = new nlohmann::json();
+    auto &fmj = *fmjPtr;
+    if (parseStrToJSONObj(fileMetaStr, fmj) == false)
+    {
+        exit(1);
+    }
+
+    // delete a specific version
+    if (isVersioned && versionToDelete != -1)
+    {
+        int curVersion = fmj["verId"].back();
+        int numVersions = fmj["verId"].size();
+
+        if (numVersions == 0)
+        {
+            // handle error
+        }
+
+        // check whether the version exists in version list
+        if (fmj["verId"].find(versionToDelete) == fmj["verId"].end())
+        {
+            // handle error
+        }
+    }
+    // TODO: remove file meta
+
     return true;
 }
 
@@ -1230,11 +1310,6 @@ int FDBMetaStore::genFileKey(unsigned char namespaceId, const char *name, int na
 int FDBMetaStore::genVersionedFileKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[])
 {
     return snprintf(key, PATH_MAX, "/%d_%*s\n%d", namespaceId, nameLength, name, version);
-}
-
-int FDBMetaStore::genFileVersionListKey(unsigned char namespaceId, const char *name, int nameLength, char key[])
-{
-    return snprintf(key, PATH_MAX, "//vl%d_%*s", namespaceId, nameLength, name);
 }
 
 bool FDBMetaStore::genFileUuidKey(unsigned char namespaceId, boost::uuids::uuid uuid, char key[])
