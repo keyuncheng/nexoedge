@@ -594,16 +594,129 @@ bool FDBMetaStore::deleteMeta(File &f)
 
         if (numVersions == 0)
         {
-            // handle error
+            LOG(WARNING) << "FDBMetaStore::deleteMeta() No version found for file " << f.name;
+            return false;
         }
 
         // check whether the version exists in version list
-        if (fmj["verId"].find(versionToDelete) == fmj["verId"].end())
+        auto it = fmj["verId"].find(versionToDelete);
+        if (it == fmj["verId"].end())
         {
             // handle error
+            LOG(WARNING) << "FDBMetaStore::deleteMeta() version not found for file " << f.name << ", version: " << versionToDelete;
+            return false;
         }
+
+        // remove a specific version
+        int idx = std::distance(fmj["verId"].begin(), it);
+        fmj["verId"].erase(fmj["verId"].begin() + idx);
+        fmj["verName"].erase(fmj["verName"].begin() + idx);
+        fmj["verSummary"].erase(fmj["verSummary"].begin() + idx);
+
+        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength);
     }
-    // TODO: remove file meta
+
+    // remove file meta
+    bool removeFileMeta = (isVersioned && fmj["verId"].size() == 0) || !isVersioned;
+    if (!removeFileMeta)
+    {
+        // update file meta (only remove a specified version)
+        std::string fmjStr = fmj.dump();
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
+
+        // commit transaction
+        delete fmjPtr;
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return true;
+    }
+
+    // directly remove file meta
+    delete fmjPtr;
+    fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength);
+
+    char fUuidKey[FDB_MAX_KEY_SIZE + 64];
+
+    // TODO remove workaround for renamed file
+    f.genUUID();
+
+    // remove file uuid key
+    if (!genFileUuidKey(f.namespaceId, f.uuid, fidKey))
+    {
+        LOG(WARNING) << "File uuid" << boost::uuids::to_string(f.uuid) << " is too long to generate a reverse key mapping";
+    }
+    else
+    {
+        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(fUuidKey), FDB_MAX_KEY_SIZE + 64);
+    }
+
+    // remove from file prefix set
+    std::string filePrefix = getFilePrefix(fileKey);
+    std::string fPrefixListStr;
+    bool fPrefixSetExist = getValueInTX(tx, filePrefix, fPrefixListStr);
+    if (fPrefixSetExist == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::deleteMeta() Error finding file prefix set";
+        exit(1);
+    }
+    nlohmann::json *fpljPtr = new nlohmann::json();
+    auto &fplj = *fpljPtr;
+    if (parseStrToJSONObj(fPrefixListStr, fplj) == false)
+    {
+        exit(1);
+    }
+
+    // remove fileKey from the list
+    auto it = fplj["list"].find(fileKey);
+    if (it != fplj["list"].end())
+    {
+        fplj["list"].erase(it);
+    }
+
+    int numFilesInDir = fplj["list"].size();
+
+    std::string fpljStr = fplj.dump();
+    delete fpljPtr;
+
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(fpljStr.c_str()), fpljStr.size());
+
+    // remove file prefix from directory set
+    if (numFilesInDir == 0)
+    {
+        std::string dirListStr;
+        bool dirListExist = getValueInTX(tx, std::string(FDB_DIR_LIST_KEY), dirListStr);
+        if (dirListExist == false)
+        {
+            LOG(ERROR) << "FDBMetaStore::deleteMeta() Error finding directory list";
+            exit(1);
+        }
+
+        nlohmann::json *dljPtr = new nlohmann::json();
+        auto &dlj = *dljPtr;
+        if (parseStrToJSONObj(dirListStr, dlj) == false)
+        {
+            exit(1);
+        }
+
+        // remove filePrefix from the list
+        auto it = dlj["list"].find(filePrefix);
+        if (it != dlj["list"].end())
+        {
+            dlj["list"].erase(it);
+        }
+
+        std::string dljStr = dlj.dump();
+        delete dljPtr;
+
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(dljStr.c_str()), dljStr.size());
+    }
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
 
     return true;
 }
