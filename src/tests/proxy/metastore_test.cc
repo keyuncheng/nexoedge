@@ -21,11 +21,29 @@ static MetaStore *metastore = NULL;
 static std::map<int, std::map<std::string, File*>> fileMapByNamespace;
 
 static MetaStore *newMetaStore();
+static void initFileName(File &);
 static void initFiles();
+static void updateFileNames(size_t);
+static void updateFileTimestamps(size_t);
+static void updateFileChecksums();
+static void updateFileContainers(size_t);
 static void updateFiles();
 static bool compareFile(size_t, const File&, const File&);
 static void exitWithError();
 static void readAndCheckFileMeta();
+
+void metaWrite(MetaStore *);
+void metaUpdate(MetaStore *);
+void metaLock(MetaStore *);
+void metaUnlock(MetaStore *);
+void metaList(MetaStore *);
+void metaDelete(MetaStore *);
+void metaForRepair(MetaStore *);
+size_t metaRename(MetaStore *);
+size_t metaUpdateTimestamps(MetaStore *);
+void metaGetByUuid(MetaStore *);
+void metaGetFolders(MetaStore *);
+
 
 int main(int argc, char **argv) {
 
@@ -37,8 +55,11 @@ int main(int argc, char **argv) {
      * 3. File lock
      * 4. File unlock
      * 5. File listing
-     * 6. File metadata delete
-     * 7. File repair list
+     * 6. File repair list
+     * 7. File renaming
+     * 8: File timestamp update
+     * 9: File name retrieval by UUID
+     * 10. File metadata delete
      *
      **/
 
@@ -76,218 +97,66 @@ int main(int argc, char **argv) {
 
     boost::timer::cpu_timer mytimer;
     // test 1: file metadata write
-    {
-        // write file metadata
-        for (size_t i = 0; i < numFilesToTest; i++)
-            if (!metastore->putMeta(f[i])) {
-                printf(">> Failed to put file %lu metadata\n", i);
-                exitWithError();
-            }
-        // read back and check
-        readAndCheckFileMeta();
-    }
-    printf("> Test %d completes: Wirte metadata of %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    metaWrite(metastore);
+    printf("> Test %d completed: Write metadata of %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     // test 2: file metadata update
     mytimer.start();
-    {
-        // update file metadata
-        updateFiles();
-        for (size_t i = 0; i < numFilesToTest; i++)
-            metastore->putMeta(f[i]);
-        // read back and check
-        readAndCheckFileMeta();
-    }
-
-    printf("> Test %d completes: Update metadata of %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    metaUpdate(metastore);
+    printf("> Test %d completed: Update metadata of %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     // test 3: file lock
     mytimer.start();
-    {
-        // lock files
-        for (size_t i = 0; i < numFilesToTest; i++)
-            if (!metastore->lockFile(f[i])) {
-                printf(">> Failed to lock file %lu\n", i);
-                exitWithError();
-            }
-
-        // suppress error message due to failed file locking attempts
-        fclose(stderr);
-
-        // lock should fail on next attempt
-        for (size_t i = 0; i < numFilesToTest; i++)
-            if (metastore->lockFile(f[i])) {
-                printf(">> Failed to prevent locking of locked file %lu\n", i);
-                exitWithError();
-            }
-    }
+    metaLock(metastore);
     printf("> Test %d compeltes: Lock %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     // test 4: file unlock
     mytimer.start();
-    {
-        // unlock files
-        for (size_t i = 0; i < numFilesToTest; i++)
-            if (!metastore->unlockFile(f[i])) {
-                printf(">> Failed to unlock file %lu (first attempt)\n", i);
-                exitWithError();
-            }
-        // lock should suceed after unlock
-        for (size_t i = 0; i < numFilesToTest; i++)
-            if (!metastore->lockFile(f[i])) {
-                printf(">> Failed to lock file %lu after unlock\n", i);
-                exitWithError();
-            }
-        // unlock files
-        for (size_t i = 0; i < numFilesToTest; i++)
-            if (!metastore->unlockFile(f[i])) {
-                printf(">> Failed to unlock file %lu (second attempt)\n", i);
-                exitWithError();
-            }
-    }
-    printf("> Test %d completes: Unlock %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    metaUnlock(metastore);
+    printf("> Test %d completed: Unlock %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     // test 5: file listing
     mytimer.start();
-    {
-        FileInfo *flist;
-        size_t totalFileCount = 0, fileCount = 0;
-        for (size_t i = 0; i < 255; i++, totalFileCount += fileCount) {
-            fileCount = metastore->getFileList(&flist, i);
-            try {
-                std::map<std::string, File*> files = fileMapByNamespace.at(i);
-                // sub file count in this namespace
-                if (files.size() != fileCount) {
-                    printf(">> Number of files in namespace %lu mismatched (%lu vs %lu)\n", i, fileCount, files.size());
-                    exitWithError();
-                }
-                // check the files
-                for (size_t fc = 0; fc < fileCount; fc++) {
-                    try {
-                        std::string fname (flist[fc].name, flist[fc].nameLength);
-                        File *f = files.at(fname);
-                        // file size
-                        if (f->size != flist[fc].size) {
-                            printf(">> File %lu in namespace %lu size mismatched (%lu vs %lu)\n", fc, i, flist[fc].size, f->size);
-                            exitWithError();
-                        }
-                        // file timestamps
-                        if (f->ctime != flist[fc].ctime ||
-                                f->atime != flist[fc].atime ||
-                                f->mtime != flist[fc].mtime
-                        ) {
-                            printf(">> File %lu in namespace %lu timestamps mismatched "
-                                    "(ctime %lu vs %lu)"
-                                    "(atime %lu vs %lu)"
-                                    "(mtime %lu vs %lu)"
-                                    "\n"
-                                    , fc, i
-                                    , flist[fc].ctime, f->ctime
-                                    , flist[fc].atime, f->atime
-                                    , flist[fc].mtime, f->mtime
-                            );
-                            exitWithError();
-                        }
-                        // file checksum (md5)
-                        if (memcmp(f->md5, flist[fc].md5, MD5_DIGEST_LENGTH) != 0) {
-                            printf("File %lu in namespace %lu md5 mismatched (%s vs %s)\n"
-                                , fc, i
-                                , ChecksumCalculator::toHex(flist[fc].md5, MD5_DIGEST_LENGTH).c_str()
-                                , ChecksumCalculator::toHex(f->md5, MD5_DIGEST_LENGTH).c_str()
-                            );
-                            exitWithError();
-                        }
-                    } catch (std::out_of_range &e) {
-                        printf(">> Failed to find the file from metadata store in namespace %lu\n", i);
-                        exitWithError();
-                    }
-                }
-                // release the file list
-                delete [] flist;
-                flist = NULL;
-            } catch (std::out_of_range &e) {
-                if (fileCount != 0) {
-                    printf(">> Number of files in namespace %lu mismatched (%lu vs 0)\n", i, fileCount);
-                }
-            }
-            
-        }
-        // total number of files obtained from the metastore
-        if (totalFileCount != numFilesToTest) {
-            printf(">> Number of files in metadata store mismatched (%lu vs %lu)\n", totalFileCount, numFilesToTest);
-            std::string line;
-            std::getline (std::cin, line);
-            exitWithError();
-        }
-        // total file count kept reported by metastore
-        if (metastore->getNumFiles() != numFilesToTest) {
-            printf(">> File count in metadata store mismatched (%lu vs %lu)\n", metastore->getNumFiles(), numFilesToTest);
-            exitWithError();
-        }
-    }
-    printf("> Test %d completes: List %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    metaList(metastore);
+    printf("> Test %d completed: List %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
-    // test 6: file metadata delete
+    // test 6: file repair list
     mytimer.start();
-    { 
-        // delete file metadata
-        for (size_t i = 0; i < numFilesToTest; i++) {
-            if (!metastore->deleteMeta(f[i])) {
-                printf(">> Failed to delete file %lu\n", i);
-                exitWithError();
-            }
-        }
-    }
-    printf("> Test %d completes: Delete %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    metaForRepair(metastore);
+    printf("> Test %d completed: Mark and unmark %lu files for repair in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
-    // test 7: file repair list
+    // test 7: file renaming
     mytimer.start();
-    {
-        // mark files for repair
-        for (size_t i = 0; i < numFilesToTest; i++) {
-            if (!metastore->markFileAsNeedsRepair(f[i])) {
-                printf(">> Failed to mark file %lu for repair\n", i);
-                exitWithError();
-            }
-        }
-        // check the number of files to repair
-        if (metastore->getNumFilesToRepair() != numFilesToTest) {
-            printf(">> Number of files to repair mismatched (%lu vs %lu)\n", metastore->getNumFilesToRepair(), numFilesToTest);
-            exitWithError();
-        }
-        // get files to repair (TODO test batch?), and mark them as repaired
-        for (size_t i = 0; i < numFilesToTest; i++) {
-            File rf[1];
-            if (!metastore->getFilesToRepair(1, rf)) {
-                try {
-                    File *of = fileMapByNamespace.at(rf[0].namespaceId).at(std::string(rf[0].name, rf[0].nameLength));
-                    // check the file metadata
-                    if (!compareFile(i, *of, rf[0])) {
-                        exitWithError();
-                    }
-                    // mark as repaired
-                    if (!metastore->markFileAsRepaired(rf[0])) {
-                        printf(">> Failed to mark file as repaired\n");
-                        exitWithError();
-                    }
-                    // check the number of files to repair
-                    if (metastore->getNumFilesToRepair() != numFilesToTest - i) {
-                        printf(">> Number of files to repair mismatched (%lu vs %lu)\n", metastore->getNumFilesToRepair(), numFilesToTest - i);
-                        exitWithError();
-                    }
-                } catch (std::out_of_range &e) {
-                    printf(">> Got a non-existing file in namespace %d from metastore for repair\n", rf[0].namespaceId);
-                    exitWithError();
-                }
-            }
-        }
-        // check the number of files to repair
-        if (metastore->getNumFilesToRepair() != 0) {
-            printf(">> Number of files to repair mismatched (%lu vs 0)\n", metastore->getNumFilesToRepair());
-            exitWithError();
-        }
-    }
-    printf("> Test %d completes: Mark and unmark %lu files for repair in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    size_t numFilesTested = metaRename(metastore);
+    printf("> Test %d completed: Rename %lu files in %.3lf seconds\n", ++testCount, numFilesTested , mytimer.elapsed().wall / 1e9);
+
+    // test 8: file timestamp updates
+    mytimer.start();
+    numFilesTested = metaUpdateTimestamps(metastore);
+    printf("> Test %d completed: Update %lu files' timestamps in %.3lf seconds\n", ++testCount, numFilesTested, mytimer.elapsed().wall / 1e9);
+
+    // test 9: file name by uuid
+    mytimer.start();
+    metaGetByUuid(metastore);
+    printf("> Test %d completed: Get %lu file names by UUID in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+
+    // test 10: folder list
+    //mytimer.start();
+    //metaGetFolders(metastore);
+    //printf("> Test %d completed: Get folder lists for %lu times in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+
+    //// test XX: file status
+    //mytimer.start();
+    //printf("> Test %d completed: Test file timestamps update in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+
+    //// test XX: journaling
+    //mytimer.start();
+    //printf("> Test %d completed: Test file timestamps update in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+
+    // test 11: file metadata delete
+    mytimer.start();
+    metaDelete(metastore);
+    printf("> Test %d completed: Delete %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     printf("End of MetaStore Test\n");
     printf("=====================\n");
@@ -332,6 +201,27 @@ void addSpecialChars(File *f) {
     if (f->nameLength >= 78) f->name[77] = '~';
 }
 
+static void initFileName(File &myfile) {
+    // free any existing file name buffer
+    free(myfile.name);
+    myfile.name = NULL;
+
+    // file name
+    myfile.nameLength = (rand() % maxFileNameLength) + 1;
+    myfile.name = (char *) malloc (myfile.nameLength + 1);
+    if (myfile.name == NULL) {
+        printf("Failed to allocate a new buffer for file name of size (%d), out of memory!\n", myfile.nameLength + 1);
+        exitWithError();
+    }
+    for (int j = 0; j < myfile.nameLength; j++)
+        myfile.name[j] = (rand() % 26) + 65; // make sure the char is between A-Z
+    addSpecialChars(&myfile);
+    myfile.name[myfile.nameLength] = 0; // null-terminated file name
+
+    // file UUID
+    myfile.genUUID();
+}
+
 static void initFiles() {
     Config &config = Config::getInstance();
 
@@ -345,15 +235,7 @@ static void initFiles() {
     // construct file metadata
     for (size_t i = 0; i < numFilesToTest; i++) {
         // file name
-        f[i].nameLength = (rand() % maxFileNameLength) + 1;
-        f[i].name = (char *) malloc (f[i].nameLength + 1);
-        for (int j = 0; j < f[i].nameLength; j++)
-            f[i].name[j] = (rand() % 26) + 65; // make sure the char is between A-Z
-        addSpecialChars(f + i);
-        f[i].name[f[i].nameLength] = 0; // null-terminated file name
-
-        // file UUID
-        f[i].genUUID();
+        initFileName(f[i]);
 
         // file namespace (255 is INVALID_NAMESPACE_ID)
         f[i].namespaceId = rand() % 255;
@@ -417,6 +299,55 @@ static void initFiles() {
     }
 }
 
+static void updateFileNames(size_t numFilesToUpdate = numFilesToTest) {
+    Config &config = Config::getInstance();
+    int n = config.getN();
+
+    for (size_t i = 0; i < numFilesToUpdate; i++) {
+        // update file name
+        initFileName(f[i]);
+        // update chunk id
+        for (int s = 0; s < f[i].numStripes; s++) {
+            for (int c = 0; c < n; c++) {
+                f[i].chunks[s * n + c].setId(f[i].namespaceId, f[i].uuid, s * n + c);
+            }
+        }
+    }
+}
+
+static void updateFileContainers(size_t numFilesToUpdate = numFilesToTest) {
+    for (size_t i = 0; i < numFilesToUpdate; i++) {
+        delete [] f[i].containerIds;
+        f[i].containerIds = new int[f[i].numChunks];
+        for (int c = 0; c < f[i].numChunks; c++)
+            f[i].containerIds[c] = rand() % 256;
+    }
+}
+
+static void initFileTimestamps() {
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        f[i].ctime = rand();
+        f[i].atime = rand();
+        f[i].mtime = rand();
+        f[i].tctime = rand();
+    }
+}
+
+static void updateFileTimestamps(size_t numFilesToUpdate) {
+    for (size_t i = 0; i < numFilesToUpdate; i++) {
+        f[i].atime = rand();
+        f[i].mtime = rand();
+        f[i].tctime = rand();
+    }
+}
+
+static void updateFileChecksums() {
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        for (int j = 0; j < MD5_DIGEST_LENGTH; j++)
+            f[i].md5[j] = rand() % 256;
+    }
+}
+
 static void updateFiles() {
     Config &config = Config::getInstance();
 
@@ -448,20 +379,13 @@ static void updateFiles() {
         }
 
         // file containers
-        delete [] f[i].containerIds;
-        f[i].containerIds = new int[f[i].numChunks];
-        for (int c = 0; c < f[i].numChunks; c++)
-            f[i].containerIds[c] = rand() % 256;
+        updateFileContainers();
 
         // file timestamps
-        f[i].ctime = rand();
-        f[i].atime = rand();
-        f[i].mtime = rand();
-        f[i].tctime = rand();
+        initFileTimestamps();
 
         // file checksum
-        for (int j = 0; j < MD5_DIGEST_LENGTH; j++)
-            f[i].md5[j] = rand() % 256;
+        updateFileChecksums();
     }
 }
 
@@ -619,7 +543,7 @@ static void readAndCheckFileMeta() {
     for (size_t i = 0; i < numFilesToTest; i++) {
         // get metadata
         File rf;
-        rf.copyNameAndSize(f[i]);
+        rf.copyName(f[i]);
         if (!metastore->getMeta(rf)) {
             printf(">> Failed to get file %lu metadata\n", i);
             exitWithError();
@@ -629,5 +553,288 @@ static void readAndCheckFileMeta() {
             exitWithError();
         }
     }
+}
+
+
+/**
+ *  Test cases
+ **/
+
+void metaWrite(MetaStore* metastore) {
+    // write file metadata
+    for (size_t i = 0; i < numFilesToTest; i++)
+        if (!metastore->putMeta(f[i])) {
+            printf(">> Failed to put file %lu metadata\n", i);
+            exitWithError();
+        }
+    // read back and check
+    readAndCheckFileMeta();
+}
+
+void metaUpdate(MetaStore* metastore) {
+    // update file metadata
+    updateFiles();
+    for (size_t i = 0; i < numFilesToTest; i++)
+        metastore->putMeta(f[i]);
+    // read back and check
+    readAndCheckFileMeta();
+}
+
+void metaLock(MetaStore *metastore) {
+    // suppress error message due to failed file locking attempts
+    fclose(stderr);
+
+    // lock files
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->lockFile(f[i])) {
+            printf(">> Failed to lock file %lu\n", i);
+            exitWithError();
+        }
+        if (metastore->lockFile(f[i])) {
+            printf(">> Failed to prevent locking of locked file %lu\n", i);
+            exitWithError();
+        }
+    }
+}
+
+void metaList(MetaStore *metastore) {
+    FileInfo *flist;
+    size_t totalFileCount = 0, fileCount = 0;
+    for (size_t i = 0; i < 255; i++, totalFileCount += fileCount) {
+        fileCount = metastore->getFileList(&flist, i);
+        try {
+            std::map<std::string, File*> files = fileMapByNamespace.at(i);
+            // sub file count in this namespace
+            if (files.size() != fileCount) {
+                printf(">> Number of files in namespace %lu mismatched (%lu vs %lu)\n", i, fileCount, files.size());
+                exitWithError();
+            }
+            // check the files
+            for (size_t fc = 0; fc < fileCount; fc++) {
+                try {
+                    std::string fname (flist[fc].name, flist[fc].nameLength);
+                    File *f = files.at(fname);
+                    // file size
+                    if (f->size != flist[fc].size) {
+                        printf(">> File %lu in namespace %lu size mismatched (%lu vs %lu)\n", fc, i, flist[fc].size, f->size);
+                        exitWithError();
+                    }
+                    // file timestamps
+                    if (f->ctime != flist[fc].ctime ||
+                            f->atime != flist[fc].atime ||
+                            f->mtime != flist[fc].mtime
+                    ) {
+                        printf(">> File %lu in namespace %lu timestamps mismatched "
+                                "(ctime %lu vs %lu)"
+                                "(atime %lu vs %lu)"
+                                "(mtime %lu vs %lu)"
+                                "\n"
+                                , fc, i
+                                , flist[fc].ctime, f->ctime
+                                , flist[fc].atime, f->atime
+                                , flist[fc].mtime, f->mtime
+                        );
+                        exitWithError();
+                    }
+                    // file checksum (md5)
+                    if (memcmp(f->md5, flist[fc].md5, MD5_DIGEST_LENGTH) != 0) {
+                        printf("File %lu in namespace %lu md5 mismatched (%s vs %s)\n"
+                            , fc, i
+                            , ChecksumCalculator::toHex(flist[fc].md5, MD5_DIGEST_LENGTH).c_str()
+                            , ChecksumCalculator::toHex(f->md5, MD5_DIGEST_LENGTH).c_str()
+                        );
+                        exitWithError();
+                    }
+                } catch (std::out_of_range &e) {
+                    printf(">> Failed to find the file from metadata store in namespace %lu\n", i);
+                    exitWithError();
+                }
+            }
+            // release the file list
+            delete [] flist;
+            flist = NULL;
+        } catch (std::out_of_range &e) {
+            if (fileCount != 0) {
+                printf(">> Number of files in namespace %lu mismatched (%lu vs 0)\n", i, fileCount);
+            }
+        }
+        
+    }
+    // total number of files obtained from the metastore
+    if (totalFileCount != numFilesToTest) {
+        printf(">> Number of files in metadata store mismatched (%lu vs %lu)\n", totalFileCount, numFilesToTest);
+        std::string line;
+        std::getline (std::cin, line);
+        exitWithError();
+    }
+    // total file count kept reported by metastore
+    if (metastore->getNumFiles() != numFilesToTest) {
+        printf(">> File count in metadata store mismatched (%lu vs %lu)\n", metastore->getNumFiles(), numFilesToTest);
+        exitWithError();
+    }
+}
+
+void metaUnlock(MetaStore *metastore) {
+    // unlock files
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->unlockFile(f[i])) {
+            printf(">> Failed to unlock file %lu (first attempt)\n", i);
+            exitWithError();
+        }
+    }
+    // lock should suceed after unlock
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->lockFile(f[i])) {
+            printf(">> Failed to lock file %lu after unlock\n", i);
+            exitWithError();
+        }
+    }
+    // unlock files
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->unlockFile(f[i])) {
+            printf(">> Failed to unlock file %lu (second attempt)\n", i);
+            exitWithError();
+        }
+    }
+}
+
+void metaDelete(MetaStore *metastore) { 
+    // delete file metadata
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->deleteMeta(f[i])) {
+            printf(">> Failed to delete file %lu\n", i);
+            exitWithError();
+        }
+    }
+}
+
+void metaForRepair(MetaStore *metastore) {
+    // mark files for repair
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->markFileAsNeedsRepair(f[i])) {
+            printf(">> Failed to mark file %lu for repair\n", i);
+            exitWithError();
+        }
+    }
+    // check the number of files to repair
+    if (metastore->getNumFilesToRepair() != numFilesToTest) {
+        printf(">> Number of files to repair mismatched (%lu vs %lu)\n", metastore->getNumFilesToRepair(), numFilesToTest);
+        exitWithError();
+    }
+    // get files to repair (TODO test batch?), and mark them as repaired
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        File rf[1];
+        if (!metastore->getFilesToRepair(1, rf)) {
+            try {
+                File *of = fileMapByNamespace.at(rf[0].namespaceId).at(std::string(rf[0].name, rf[0].nameLength));
+                // check the file metadata
+                if (!compareFile(i, *of, rf[0])) {
+                    exitWithError();
+                }
+                // mark as repaired
+                if (!metastore->markFileAsRepaired(rf[0])) {
+                    printf(">> Failed to mark file as repaired\n");
+                    exitWithError();
+                }
+                // check the number of files to repair
+                if (metastore->getNumFilesToRepair() != numFilesToTest - i) {
+                    printf(">> Number of files to repair mismatched (%lu vs %lu)\n", metastore->getNumFilesToRepair(), numFilesToTest - i);
+                    exitWithError();
+                }
+            } catch (std::out_of_range &e) {
+                printf(">> Got a non-existing file in namespace %d from metastore for repair\n", rf[0].namespaceId);
+                exitWithError();
+            }
+        }
+    }
+    // check the number of files to repair
+    if (metastore->getNumFilesToRepair() != 0) {
+        printf(">> Number of files to repair mismatched (%lu vs 0)\n", metastore->getNumFilesToRepair());
+        exitWithError();
+    }
+}
+
+size_t metaRename(MetaStore *metastore) {
+    size_t portionToRename = 2;
+    size_t numFilesToRename = numFilesToTest / portionToRename;
+    if (numFilesToRename < 1) {
+        numFilesToRename = 1;
+    }
+    // backup the file names before rename for operation and non-existance check
+    File of[numFilesToTest];
+    for (size_t i = 0; i < numFilesToRename; i++) {
+        of[i].copyNameAndSize(f[i]);
+    }
+    
+    updateFileNames(numFilesToRename);
+
+    // perform the rename operations
+    for (size_t i = 0; i < numFilesToRename; i++) {
+        File df;
+        df.copyName(f[i]);
+        if (metastore->renameMeta(of[i], df) == false) {
+            printf(">> Failed to rename the %lu file.\n", i);
+            exitWithError();
+        }
+    }
+
+    readAndCheckFileMeta();
+
+    // check the rename result by query using the old name (and expect failures)
+    for (size_t i = 0; i < numFilesToRename; i++) {
+        File rf;
+        rf.copyName(of[i]);
+        if (metastore->getMeta(rf) == true) {
+            printf(">> Failed to get the expected failure reply for the %lu renamed file.\n", i);
+            exitWithError();
+        }
+    }
+
+    return numFilesToRename;
+}
+
+size_t metaUpdateTimestamps(MetaStore *metastore) {
+    size_t portionToUpdate = 2;
+    size_t numFilesToUpdate = numFilesToTest / portionToUpdate;
+    
+    // update the metadata timestamps
+    for (size_t i = 0; i < numFilesToUpdate; i++) {
+        updateFileTimestamps(numFilesToUpdate);
+    }
+
+    // update metadata in the metastore
+    for (size_t i = 0; i < numFilesToUpdate; i++) {
+        File nf;
+        nf.copyName(f[i]);
+        nf.copyTimeStamps(f[i]);
+        if (metastore->updateTimestamps(nf) == false) {
+            printf(">> Failed to update timestamps of file %lu.\n", i);
+            exitWithError();
+        }
+    }
+ 
+    readAndCheckFileMeta();
+
+    return numFilesToUpdate;
+}
+
+void metaGetByUuid(MetaStore *metastore) {
+    // get file name by uuid
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        File rf;
+        rf.namespaceId = f[i].namespaceId;
+        if (metastore->getFileName(f[i].uuid, rf) == false) {
+            printf(">> Failed to get any file name of file  %lu using its UUID.\n", i);
+            exitWithError();
+        }
+        if (f[i].nameLength != rf.nameLength || memcmp(f[i].name, rf.name, f[i].nameLength) != 0) {
+            printf(">> Failed to get the correct name for file %lu using its UUID (%d vs %d, %*s vs %*s).\n", i, rf.nameLength, f[i].nameLength, rf.nameLength, rf.name, f[i].nameLength, f[i].name);
+            exitWithError();
+        }
+    }
+}
+
+void metaGetFolders(MetaStore *metastore) {
+    std::vector<std::string> folderList;   
 }
 

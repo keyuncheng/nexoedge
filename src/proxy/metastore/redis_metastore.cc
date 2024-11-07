@@ -872,7 +872,7 @@ bool RedisMetaStore::renameMeta(File &sf, File &df) {
         _cxt
         , "SET %s %b"
         , dfidKey
-        , dfname, (size_t) dnameLength
+        , df.name, (size_t) df.nameLength
     );
 
     DLOG(INFO) << "Add reverse mapping (" << dfidKey << ") for file " << dfname;
@@ -1067,8 +1067,10 @@ bool RedisMetaStore::getFileName(boost::uuids::uuid fuuid, File &f) {
     std::lock_guard<std::mutex> lk(_lock);
 
     char fidKey[MAX_KEY_SIZE + 64];
-    if (!genFileUuidKey(f.namespaceId, fuuid, fidKey))
+    if (!genFileUuidKey(f.namespaceId, fuuid, fidKey)) {
+        LOG(WARNING) << "Failed to generate a file key using the UUID for file name retrieval!";
         return false;
+    }
     return getFileName(fidKey, f);
 }
 
@@ -2199,7 +2201,7 @@ bool RedisMetaStore::getFileName(char name[], File &f) {
     } else {
         f.nameLength = r->len;
         f.name = (char *) malloc (r->len + 1);
-        strncpy(f.name, r->str, r->len);
+        memcpy(f.name, r->str, r->len);
         f.name[r->len] = 0;
     }
     if (r == NULL) {
