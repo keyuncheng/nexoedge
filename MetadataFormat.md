@@ -264,8 +264,7 @@
 
 #### renameMeta()
 
-* The flow of renameMeta() is very similar to Redis-based metastore; will
-  update details after impl
+* The flow of renameMeta() is very similar to Redis-based metastore
 
 #### genFileKey()
 

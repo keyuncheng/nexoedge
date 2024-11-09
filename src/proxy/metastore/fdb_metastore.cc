@@ -723,7 +723,7 @@ bool FDBMetaStore::deleteMeta(File &f)
 
 bool FDBMetaStore::renameMeta(File &sf, File &df)
 {
-    // file names
+    // src and dst file keys
     char srcFileKey[PATH_MAX], dstFileKey[PATH_MAX];
     int srcFileKeyLength = genFileKey(sf.namespaceId, sf.name, sf.nameLength, srcFileKey);
     int dstFileKeyLength = genFileKey(df.namespaceId, df.name, df.nameLength, dstFileKey);
@@ -746,142 +746,109 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
 
     // rename file key from srcFileKey to dstFileKey
 
-    // retrieve the original metadata
-    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(srcfileKey), srcFileKeyLength, 0 /** not set snapshot */);
-    exitOnError(fdb_future_block_until_ready(fileMetaFut));
-    fdb_bool_t fileMetaExist;
-    const uint8_t *fileMetaRaw = NULL;
-    int fileMetaRawLength;
-    exitOnError(fdb_future_get_value(fileMetaFut, &fileMetaExist, &fileMetaRaw, &fileMetaRawLength));
-    fdb_future_destroy(fileMetaFut);
-    fileMetaFut = nullptr;
-
+    // obtain file metadata
+    std::string fileMetaStr;
+    bool fileMetaExist = getValueInTX(tx, srcFileKey, fileMetaStr);
     if (fileMetaExist == false)
     {
         LOG(ERROR) << "FDBMetaStore::renameMeta() Error reading metadata for file" << sf.name;
 
         // commit transaction
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
         return false;
     }
-    else
+
+    // parse fileMeta as JSON object
+    nlohmann::json *fmjPtr = new nlohmann::json();
+    auto &fmj = *fmjPtr;
+    try
     {
-        // parse fileMeta as JSON object
-        nlohmann::json *fmjptr = new nlohmann::json();
-        auto &fmj = *fmjptr;
-        try
-        {
-            std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
-            fmj = nlohmann::json::parse(filMetaRawStr);
-        }
-        catch (std::exception e)
-        {
-            LOG(ERROR) << "FDBMetaStore::putMeta() Error parsing JSON string: " << e.what();
-            exit(1);
-        }
-
-        // update uuid-to-file-name mapping
-        fmj["uuid"] = boost::uuids::to_string(df.uuid).c_str();
-
-        // serialize json to string and store in FDB
-        std::string fmjStr = fmj.dump();
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileKey), dstFileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
-        delete fmjptr;
-
-        // remove original metadata
-        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(srcfileKey), srcFileKeyLength);
+        std::string filMetaStr(reinterpret_cast<const char *>(fileMetaRaw));
+        fmj = nlohmann::json::parse(filMetaStr);
+    }
+    catch (std::exception e)
+    {
+        LOG(ERROR) << "FDBMetaStore::putMeta() Error parsing JSON string: " << e.what();
+        exit(1);
     }
 
-    // set dfidKey; remove the original sfidKey (check putMeta impl)
+    // update uuid-to-file-name mapping
+    fmj["uuid"] = boost::uuids::to_string(df.uuid).c_str();
+
+    // store in dstFileKey
+    std::string fmjStr = fmj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileKey), dstFileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
+    delete fmjPtr;
+
+    // remove srcFileKey
+    fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(srcFileKey), srcFileKeyLength);
+
+    // set dstFileUuidKey; remove the original sfidKey (check putMeta impl)
     // insert new metadata
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileUuidKey), FDB_MAX_KEY_SIZE + 64, dstFileKey, dstFileKeyLength);
 
     DLOG(INFO) << "FDBMetaStore::renameMeta() Add reverse mapping (" << dstFileUuidKey << ") for file " << dstFileKey;
 
-    // remove original mapping
+    // remove srcFileUuidKey
     fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(srcFileUuidKey), FDB_MAX_KEY_SIZE + 64);
-
-    std::string dstFilePrefix = getFilePrefix(dstFileKey);
 
     // update the src file prefix set
     std::string srcFilePrefix = getFilePrefix(srcFileKey);
-    FDBFuture *srcFilePrefixFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(srcFilePrefix.c_str()), srcFilePrefix.size(), 0); // not set snapshot
-    exitOnError(fdb_future_block_until_ready(srcFilePrefixFut));
-    fdb_bool_t srcFilePrefixExist;
-    const uint8_t *srcFilePrefixRaw = NULL;
-    int srcFilePrefixRawLength;
-    exitOnError(fdb_future_get_value(srcFilePrefixFut, &srcFilePrefixExist, &srcfilePrefixRaw, &srcFilePrefixRawLength));
-    fdb_future_destroy(srcFilePrefixFut);
-    srcFilePrefixFut = nullptr;
-    if (!srcFilePrefixExist)
+
+    std::string srcFilePrefixListStr;
+    bool srcFilePrefixSetExist = getValueInTX(tx, srcFilePrefix, srcFilePrefixListStr);
+    if (srcFilePrefixSetExist == false)
     {
-        LOG(ERROR) << "FDBMetaStore::putMeta() Error finding src prefix set: " << e.what();
+        LOG(ERROR) << "FDBMetaStore::renameMeta() Error finding file prefix set";
         exit(1);
     }
-    else
-    {
-        std::string dljstr(reinterpret_cast<const char *>(srcFilePrefixRaw), srcFilePrefixRawLength);
-        // add srcFileKey to the list (avoid duplication)
-        nlohmann::json *dljptr = new nlohmann::json();
-        auto &dlj = *dljptr;
-        dlj.parse(dljstr);
-        if (dlj["list"].find(srcFileKey) != dlj["list"].end())
-        {
-            dlj["list"].erase(srcFileKey);
-        }
-        std::string dljstr = dlj.dump();
-        delete dljptr;
 
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(srcFilePrefix.c_str()), srcFilePrefix.size(), reinterpret_cast<const uint8_t *>(dljstr.c_str()), dljstr.size());
+    nlohmann::json *srcFPljPtr = new nlohmann::json();
+    auto &srcFPlj = *srcFPljPtr;
+    if (parseStrToJSONObj(srcFilePrefixListStr, srcFPlj) == false)
+    {
+        exit(1);
     }
+
+    // remove srcFileKey
+    srcFPlj["list"].erase(std::remove(srcFPlj["list"].begin(), srcFPlj["list"].end(), srcFileKey), srcFPlj["list"].end());
+
+    std::string srcFPljStr = srcFPlj.dump();
+    delete srcFPljPtr;
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(srcFilePrefix.c_str()), srcFilePrefix.size(), reinterpret_cast<const uint8_t *>(srcFPljStr.c_str()), srcFPljStr.size());
 
     // update the dst file prefix set
     std::string dstFilePrefix = getFilePrefix(dstFileKey);
-    FDBFuture *dstFilePrefixFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(dstFilePrefix.c_str()), dstFilePrefix.size(), 0); // not set snapshot
-    exitOnError(fdb_future_block_until_ready(dstFilePrefixFut));
-    fdb_bool_t dstFilePrefixExist;
-    const uint8_t *dstFilePrefixRaw = NULL;
-    int dstFilePrefixRawLength;
-    exitOnError(fdb_future_get_value(dstFilePrefixFut, &dstFilePrefixExist, &dstfilePrefixRaw, &dstFilePrefixRawLength));
-    fdb_future_destroy(dstFilePrefixFut);
-    dstFilePrefixFut = nullptr;
+    std::string dstFilePrefixListStr;
+    bool dstFilePrefixSetExist = getValueInTX(tx, dstFilePrefix, dstFilePrefixListStr);
 
-    nlohmann::json *dljptr = new nlohmann::json();
-    auto &dlj = *dljptr;
-    if (!dstFilePrefixExist)
+    nlohmann::json *dstFPljPtr = new nlohmann::json();
+    auto &dstFPlj = *dstFPljPtr;
+    if (dstFilePrefixSetExist == false)
     {
-        // create the list and add to the list
-        dlj["list"] = nlohmann::json::array();
-        dlj["list"].push_back(dstFileKey);
-
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(dljstr.c_str()), dljstr.size());
+        dstFPlj["list"] = nlohmann::json::array();
     }
     else
     {
-        // parse from existing prefix set
-        std::string dljstr(reinterpret_cast<const char *>(dstFilePrefixRaw), dstFilePrefixRawLength);
-        dlj.parse(dljstr);
-        // add dstFileKey to the list (avoid duplication)
-        if (dlj["list"].find(dstFileKey) == dlj["list"].end())
+        if (parseStrToJSONObj(dstFilePrefixListStr, dstFPlj) == false)
         {
-            dlj["list"].push_back(dstFileKey);
+            exit(1);
         }
-        std::string dljstr = dlj.dump();
-        delete dljptr;
     }
+    dstFPlj["list"].push_back(dstFileKey);
 
-    std::string dljstr = dlj.dump();
-    delete dljptr;
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFilePrefix.c_str()), dstFilePrefix.size(), reinterpret_cast<const uint8_t *>(dljstr.c_str()), dljstr.size());
+    std::string dstFPljStr = dstFPlj.dump();
+    delete dstFPljPtr;
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFilePrefix.c_str()), dstFilePrefix.size(), reinterpret_cast<const uint8_t *>(dstFPljStr.c_str()), dstFPljStr.size());
 
     // commit transaction
-    FDBFuture *fcmt = fdb_transaction_commit(tx);
-    exitOnError(fdb_future_block_until_ready(fcmt));
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
 
-    fdb_future_destroy(fcmt);
+    fdb_future_destroy(cmt);
 
     LOG(INFO) << "FDBMetaStore:: renameMeta() finished";
 
