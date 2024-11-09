@@ -266,6 +266,10 @@
 
 * The flow of renameMeta() is very similar to Redis-based metastore
 
+#### updateTimeTimeStamps()
+
+* The flow of updateTimeTimeStamps() is very similar to Redis-based metastore
+
 #### genFileKey()
 
 * The same as Redis

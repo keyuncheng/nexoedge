@@ -869,101 +869,64 @@ bool FDBMetaStore::updateTimestamps(const File &f)
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
     // check whether the file metadata exists
-    FDBFuture *fileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, 0 /** not set snapshot */);
-    exitOnError(fdb_future_block_until_ready(fileMetaFut));
-    fdb_bool_t fileMetaExist;
-    const uint8_t *fileMetaRaw = NULL;
-    int fileMetaRawLength;
-    exitOnError(fdb_future_get_value(fileMetaFut, &fileMetaExist, &fileMetaRaw, &fileMetaRawLength));
-    fdb_future_destroy(fileMetaFut);
-    fileMetaFut = nullptr;
-
-    // current metadata format: key: filename; value: {"verList": [v0, v1, v2,
-    // ...]}; for non-versioned system, verList only stores v0
-    nlohmann::json *fmjptr = new nlohmann::json();
-    auto &fmj = *fmjptr;
-
-    std::String verFileKey;
-
+    std::string fileMetaStr;
+    bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
     if (fileMetaExist == false)
     {
         LOG(ERROR) << "FDBMetaStore::updateTimestamps() failed to get metadata for file " << f.name;
 
         // commit transaction and return
-        delete fmjptr;
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
         return false;
     }
-    else
+
+    // current metadata format: key: filename; value: {"verList": [v0, v1, v2,
+    // ...]}; for non-versioned system, verList only stores v0
+    nlohmann::json *fmjPtr = new nlohmann::json();
+    auto &fmj = *fmjPtr;
+    if (parseStrToJSONObj(fileMetaStr, fmj) == false)
     {
-        // parse fileMeta as JSON object
-        try
-        {
-            std::string filMetaRawStr(reinterpret_cast<const char *>(fileMetaRaw));
-            fmj = nlohmann::json::parse(filMetaRawStr);
-        }
-        catch (std::exception e)
-        {
-            LOG(ERROR) << "FDBMetaStore::updateTimestamps() Error parsing JSON string: " << e.what();
-            exit(1);
-        }
-
-        delete fmjptr;
-
-        verFileKey = fmj["verList"].back().get<std::string>();
+        exit(1);
     }
+
+    std::string verFileKey = fmj["verName"].back().get<std::string>();
 
     // find metadata for current file version
-    FDBFuture *verFileMetaFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, 0 /** not set snapshot */);
-    exitOnError(fdb_future_block_until_ready(verFileMetaFut));
-    fdb_bool_t verFileMetaExist;
-    const uint8_t *verFileMetaRaw = NULL;
-    int verFileMetaRawLength;
-    exitOnError(fdb_future_get_value(verFileMetaFut, &verFileMetaExist, &verFileMetaRaw, &verFileMetaRawLength));
-    fdb_future_destroy(verFileMetaFut);
-    verFileMetaFut = nullptr;
-
-    nlohmann::json *vfmjptr = new nlohmann::json();
-    auto &vfmj = *vfmjptr;
-
+    std::string verFileMetaStr;
+    bool verFileMetaExist = getValueInTX(tx, verFileKey, verFileMetaStr);
     if (verFileMetaExist == false)
     {
-        LOG(ERROR) << "FDBMetaStore::updateTimestamps() failed to get versioned metadata for file " << f.name;
-
         // commit transaction and return
-        delete vfmjptr;
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
         return false;
     }
-    else
+
+    nlohmann::json *vfmjPtr = new nlohmann::json();
+    auto &vfmj = *vfmjPtr;
+    if (parseStrToJSONObj(verFileMetaStr, vfmj) == false)
     {
-        // parse fileMeta as JSON object
-        try
-        {
-            std::string verFileMetaRawStr(reinterpret_cast<const char *>(verFileMetaRaw));
-            vfmj = nlohmann::json::parse(verFileMetaRawStr);
-        }
-        catch (std::exception e)
-        {
-            LOG(ERROR) << "FDBMetaStore::updateTimestamps() Error parsing JSON string: " << e.what();
-            exit(1);
-        }
-
-        vfmj["atime"] = std::to_string(f.atime);
-        vfmj["mtime"] = std::to_string(f.mtime);
-        vfmj["ctime"] = std::to_string(f.ctime);
-
-        // serialize json to string and store in FDB
-        std::string vfmjStr = vfmj.dump();
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
-        delete vfmjptr;
+        exit(1);
     }
+
+    vfmj["atime"] = std::to_string(f.atime);
+    vfmj["mtime"] = std::to_string(f.mtime);
+    vfmj["ctime"] = std::to_string(f.ctime);
+
+    // serialize json to string and store in FDB
+    std::string vfmjStr = vfmj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
+    delete vfmjPtr;
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
 
     LOG(INFO) << "FDBMetaStore:: updateTimestamps() finished";
 
@@ -1006,9 +969,9 @@ int FDBMetaStore::updateChunks(const File &f, int version)
 
         // commit transaction and return
         delete fmjptr;
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
         return false;
     }
@@ -1050,9 +1013,9 @@ int FDBMetaStore::updateChunks(const File &f, int version)
 
         // commit transaction and return
         delete vfmjptr;
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
         return false;
     }
@@ -1374,9 +1337,9 @@ bool FDBMetaStore::getFileName(char fileUuidKey[], File &f)
         f.name[f.nameLength] = 0;
 
         // commit transaction and return
-        FDBFuture *fcmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(fcmt));
-        fdb_future_destroy(fcmt);
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
         return true;
     }
