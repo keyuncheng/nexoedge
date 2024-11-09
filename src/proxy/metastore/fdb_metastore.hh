@@ -222,7 +222,6 @@ private:
 
     // helper functions (mostly copied from RedisMetaStore)
     bool markFileRepairStatus(const File &file, bool needsRepair);
-    bool getFileName(char fileUuidKey[], File &f);
     int genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
     int genVersionedFileKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]);
     bool genFileUuidKey(unsigned char namespaceId, boost::uuids::uuid uuid, char key[]);
@@ -230,6 +229,15 @@ private:
     int genChunkKeyPrefix(int chunkId, char prefix[]);
     const char *getBlockKeyPrefix(bool unique);
     int genBlockKey(int blockId, char prefix[], bool unqiue);
+
+    bool getFileName(char fileUuidKey[], File &f);
+    bool isSystemKey(const char *key);
+    bool isVersionedFileKey(const char *key);
+
+    bool getLockOnFile(const File &file, bool lock);
+    bool pinStagedFile(const File &file, bool pine);
+
+    bool lockFile(const File &file, bool lock, const char *type, const char *name);
 };
 
 #endif // define __FDB_METASTORE_HH__

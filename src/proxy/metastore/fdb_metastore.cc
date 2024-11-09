@@ -1081,12 +1081,13 @@ bool RedisMetaStore::markFileRepairStatus(const File &file, bool needsRepair)
 
 bool FDBMetaStore::markFileAsPendingWriteToCloud(const File &file)
 {
-    return false;
+    return markFileStatus(file, FILE_PENDING_WRITE_KEY, true, "pending write to cloud");
 }
 
 bool FDBMetaStore::markFileAsWrittenToCloud(const File &file, bool removePending)
 {
-    return false;
+    return markFileStatus(file, FILE_PENDING_WRITE_COMP_KEY, false, "pending completing write to cloud") &&
+           (!removePending || markFileStatus(file, FILE_PENDING_WRITE_KEY, false, "pending write to cloud"));
 }
 
 int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
@@ -1106,12 +1107,38 @@ bool FDBMetaStore::getNextFileForTaskCheck(File &file)
 
 bool FDBMetaStore::lockFile(const File &file)
 {
-    return true;
+    std::lock_guard<std::mutex> lk(_lock);
+    return getLockOnFile(file, true);
 }
 
 bool FDBMetaStore::unlockFile(const File &file)
 {
-    return true;
+    std::lock_guard<std::mutex> lk(_lock);
+    return getLockOnFile(file, false);
+}
+
+std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char *field, size_t fieldLength)
+{
+    std::string fieldKey(field, fieldLength);
+
+    // expected format 'c<chunk_id>-<type>-<container_id>', e.g., c00-op-1
+    size_t delimiter1 = fieldKey.find("-");
+    size_t delimiter2 = fieldKey.find("-", delimiter1 + 1);
+    if (delimiter1 == std::string::npos || delimiter2 == std::string::npos)
+    {
+        return std::make_tuple(INVALID_CHUNK_ID, "", INVALID_CONTAINER_ID);
+    }
+
+    int chunkId, containerId;
+    std::string type;
+    // first part is 'c[0-9]+'
+    chunkId = strtol(fieldKey.substr(1, delimiter1 - 1).c_str(), NULL, 10);
+    // second part is a string
+    type = fieldKey.substr(delimiter1 + 1, delimiter2 - delimiter1 - 1);
+    // third part is a '[0-9]+'
+    containerId = strtol(fieldKey.substr(delimiter2 + 1).c_str(), NULL, 10);
+
+    return std::make_tuple(chunkId, type, containerId);
 }
 
 bool FDBMetaStore::addChunkToJournal(const File &file, const Chunk &chunk, int containerId, bool isWrite)
@@ -1269,45 +1296,6 @@ bool FDBMetaStore::parseStrToJSONObj(const std::string &str, nlohmann::json &j)
     return true;
 }
 
-bool FDBMetaStore::getFileName(char fileUuidKey[], File &f)
-{
-    // create transaction
-    FDBTransaction *tx;
-    exitOnError(fdb_database_create_transaction(_db, &tx));
-
-    // check whether the file metadata exists
-    FDBFuture *fileKeyFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(fileUuidKey), FDB_MAX_KEY_SIZE + 64, 0 /** not set snapshot */);
-    exitOnError(fdb_future_block_until_ready(fileKeyFut));
-    fdb_bool_t fileKeyExist;
-    const uint8_t *fileKeyRaw = NULL;
-    int fileKeyRawLength;
-    exitOnError(fdb_future_get_value(fileKeyFut, &fileKeyExist, &fileKeyRaw, &fileKeyRawLength));
-    fdb_future_destroy(fileKeyFut);
-    fileKeyFut = nullptr;
-
-    if (fileKeyFut == false)
-    {
-        LOG(ERROR) << "FDBMetaStore::getFileName() failed to get filename from fileUuidKey " << fileUuidKey;
-        return false;
-    }
-    else
-    {
-        // copy to file name
-        std::string fileKeyRawStr(reinterpret_cast<const char *>(fileKeyRaw));
-        f.nameLength = fileKeyRawStr.size();
-        f.name = (char *)malloc(f.nameLength + 1);
-        strncpy(f.name, fileKeyRawStr.c_str(), f.nameLength);
-        f.name[f.nameLength] = 0;
-
-        // commit transaction and return
-        FDBFuture *cmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(cmt));
-        fdb_future_destroy(cmt);
-
-        return true;
-    }
-}
-
 int FDBMetaStore::genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[])
 {
     return snprintf(key, PATH_MAX, "%d_%*s", namespaceId, nameLength, name);
@@ -1321,6 +1309,109 @@ int FDBMetaStore::genVersionedFileKey(unsigned char namespaceId, const char *nam
 bool FDBMetaStore::genFileUuidKey(unsigned char namespaceId, boost::uuids::uuid uuid, char key[])
 {
     return snprintf(key, FDB_MAX_KEY_SIZE + 64, "//fu%d-%s", namespaceId, boost::uuids::to_string(uuid).c_str()) <= FDB_MAX_KEY_SIZE;
+}
+
+int FDBMetaStore::genChunkKeyPrefix(int chunkId, char prefix[])
+{
+    return snprintf(prefix, FDB_MAX_KEY_SIZE, "c%d", chunkId);
+}
+
+const char *FDBMetaStore::getBlockKeyPrefix(bool unique)
+{
+    return unique ? "ub" : "db";
+}
+
+int FDBMetaStore::genBlockKey(int blockId, char prefix[], bool unique)
+{
+    return snprintf(prefix, FDB_MAX_KEY_SIZE, "%s%d", getBlockKeyPrefix(unique), blockId);
+}
+
+bool FDBMetaStore::getNameFromFileKey(const char *str, size_t len, char **name, int &nameLength, unsigned char &namespaceId, int *version)
+{
+    // full name in form of "namespaceId_filename"
+    int ofs = isVersionedFileKey(str) ? 1 : 0;
+    std::string fullname(str + ofs, len - ofs);
+    size_t dpos = fullname.find_first_of("_");
+    if (dpos == std::string::npos)
+        return false;
+    size_t epos = fullname.find_first_of("\n");
+    if (epos == std::string::npos)
+    {
+        epos = len;
+    }
+    else if (version)
+    {
+        *version = atoi(str + ofs + epos + 1);
+    }
+
+    // fill in the namespace id, file name length and file name
+    std::string namespaceIdStr(fullname, 0, dpos);
+    namespaceId = strtol(namespaceIdStr.c_str(), NULL, 10) % 256;
+    *name = (char *)malloc(epos - dpos);
+    nameLength = epos - dpos - 1;
+    memcpy(*name, str + ofs + dpos + 1, nameLength);
+    (*name)[nameLength] = 0;
+
+    return true;
+}
+
+bool FDBMetaStore::getFileName(char fileUuidKey[], File &f)
+{
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // check whether the file metadata exists
+    std::string fileKeyStr;
+    bool fileKeyExist = getValueInTX(tx, fileUuidKey, fileKeyStr);
+    if (fileKeyExist == false)
+    {
+        LOG(WARNING) << "FDBMetaStore::getFileName() failed to get filename from File UUID Key " << fileUuidKey;
+
+        // commit transaction and return
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return false;
+    }
+
+    // current metadata format: key: filename; value: {"verList": [v0, v1, v2,
+    // ...]}; for non-versioned system, verList only stores v0
+    nlohmann::json *fileKeyPtr = new nlohmann::json();
+    auto &fileKeyj = *fileKeyPtr;
+    if (parseStrToJSONObj(fileKeyStr, fileKeyj) == false)
+    {
+        exit(1);
+    }
+
+    // copy to file name
+    f.nameLength = fileKeyStr.size();
+    f.name = (char *)malloc(f.nameLength + 1);
+    strncpy(f.name, fileKeyStr.c_str(), f.nameLength);
+    f.name[f.nameLength] = 0;
+    delete fileKeyj;
+
+    // commit transaction and return
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
+    return true;
+}
+
+bool FDBMetaStore::isSystemKey(const char *key)
+{
+    return (
+        strncmp("//", key, 2) == 0 ||
+        false);
+}
+
+bool FDBMetaStore::isVersionedFileKey(const char *key)
+{
+    return (
+        strncmp("/", key, 1) == 0 ||
+        false);
 }
 
 std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
@@ -1345,41 +1436,74 @@ std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
     return filePrefix.append(name, slash - name);
 }
 
-int FDBMetaStore::genChunkKeyPrefix(int chunkId, char prefix[])
+bool FDBMetaStore::getLockOnFile(const File &file, bool lock)
 {
-    return snprintf(prefix, FDB_MAX_KEY_SIZE, "c%d", chunkId);
+    return lockFile(file, lock, FDB_FILE_LOCK_KEY, "lock");
 }
 
-int FDBMetaStore::genBlockKey(int blockId, char prefix[], bool unique)
+bool FDBMetaStore::pinStagedFile(const File &file, bool lock)
 {
-    return snprintf(prefix, FDB_MAX_KEY_SIZE, "%s%d", getBlockKeyPrefix(unique), blockId);
+    return lockFile(file, lock, FDB_FILE_PIN_STAGED_KEY, "pin");
 }
 
-const char *FDBMetaStore::getBlockKeyPrefix(bool unique)
+bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const char *name)
 {
-    return unique ? "ub" : "db";
-}
+    char fileKey[PATH_MAX];
 
-std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char *field, size_t fieldLength)
-{
-    std::string fieldKey(field, fieldLength);
+    int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
 
-    // expected format 'c<chunk_id>-<type>-<container_id>', e.g., c00-op-1
-    size_t delimiter1 = fieldKey.find("-");
-    size_t delimiter2 = fieldKey.find("-", delimiter1 + 1);
-    if (delimiter1 == std::string::npos || delimiter2 == std::string::npos)
+    std::string lockListName(type);
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // add filename to file Prefix Set
+    std::string lockListStr;
+    bool lockListExist = getValueInTX(tx, lockListName, lockListStr);
+
+    nlohmann::json *lljPtr = new nlohmann::json();
+    auto &llj = *lljPtr;
+    if (lockListExist == false)
     {
-        return std::make_tuple(INVALID_CHUNK_ID, "", INVALID_CONTAINER_ID);
+        // create the set and add the fileKey
+        llj["list"] = nlohmann::json::array();
+
+        if (lock == true)
+        {
+            llj["list"].push_back(fileKey);
+        }
     }
+    else
+    {
+        if (parseStrToJSONObj(lockListStr, llj) == false)
+        {
+            exit(1);
+        }
 
-    int chunkId, containerId;
-    std::string type;
-    // first part is 'c[0-9]+'
-    chunkId = strtol(fieldKey.substr(1, delimiter1 - 1).c_str(), NULL, 10);
-    // second part is a string
-    type = fieldKey.substr(delimiter1 + 1, delimiter2 - delimiter1 - 1);
-    // third part is a '[0-9]+'
-    containerId = strtol(fieldKey.substr(delimiter2 + 1).c_str(), NULL, 10);
+        if (lock == true)
+        {
+            if (llj["list"].find(fileKey) == llj["list"].end())
+            {
+                llj["list"].push_back(fileKey);
+            }
+        }
+        else
+        {
+            if (llj["list"].find(fileKey) != llj["list"].end())
+            {
+                llj["list"].erase(std::remove(llj["list"].begin(), llj["list"].end(), fileKey), llj["list"].end());
+            }
+        }
+    }
+    std::string lljStr = llj.dump();
+    delete lljPtr;
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(lockListName.c_str()), lockListName.size(), reinterpret_cast<const uint8_t *>(lljStr.c_str()), lljStr.size());
 
-    return std::make_tuple(chunkId, type, containerId);
+    // commit transaction and return
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
+    return false;
 }
