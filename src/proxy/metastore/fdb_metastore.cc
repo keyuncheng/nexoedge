@@ -1064,14 +1064,14 @@ int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
     return 0;
 }
 
-bool FDBMetaStore::markFileAsNeedsRepair(const File &file)
-{
-    return markFileRepairStatus(file, false);
-}
-
 bool FDBMetaStore::markFileAsRepaired(const File &file)
 {
     return markFileRepairStatus(file, true);
+}
+
+bool FDBMetaStore::markFileAsNeedsRepair(const File &file)
+{
+    return markFileRepairStatus(file, false);
 }
 
 bool RedisMetaStore::markFileRepairStatus(const File &file, bool needsRepair)
@@ -1090,6 +1090,11 @@ bool FDBMetaStore::markFileAsWrittenToCloud(const File &file, bool removePending
            (!removePending || markFileStatus(file, FILE_PENDING_WRITE_KEY, false, "pending write to cloud"));
 }
 
+bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool set, const char *opName)
+{
+    return false;
+}
+
 int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
 {
     return false;
@@ -1097,7 +1102,7 @@ int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
 
 bool FDBMetaStore::updateFileStatus(const File &file)
 {
-    return true;
+    return false;
 }
 
 bool FDBMetaStore::getNextFileForTaskCheck(File &file)
@@ -1144,12 +1149,12 @@ std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char *field,
 bool FDBMetaStore::addChunkToJournal(const File &file, const Chunk &chunk, int containerId, bool isWrite)
 {
     extractJournalFieldKeyParts("", 0);
-    return true;
+    return false;
 }
 
 bool FDBMetaStore::updateChunkInJournal(const File &file, const Chunk &chunk, bool isWrite, bool deleteRecord, int containerId)
 {
-    return true;
+    return false;
 }
 
 void FDBMetaStore::getFileJournal(const FileInfo &file, std::vector<std::tuple<Chunk, int /* container id*/, bool /* isWrite */, bool /* isPre */>> &records)
@@ -1163,137 +1168,7 @@ int FDBMetaStore::getFilesWithJounal(FileInfo **list)
 
 bool FDBMetaStore::fileHasJournal(const File &file)
 {
-    return true;
-}
-
-void FDBMetaStore::exitOnError(fdb_error_t err)
-{
-    if (err)
-    {
-        LOG(ERROR) << "FoundationDB MetaStore error: " << fdb_get_error(err);
-        exit(1);
-    }
-}
-
-void *FDBMetaStore::runNetwork(void *args)
-{
-    fdb_error_t err = fdb_run_network();
-    if (err)
-    {
-        LOG(ERROR) << "FDBMetaStore::runNetwork fdb_run_network() error";
-        exit(1);
-    }
-
-    return NULL;
-}
-
-FDBDatabase *FDBMetaStore::getDatabase(std::string clusterFile)
-{
-    FDBDatabase *db;
-    exitOnError(fdb_create_database(clusterFile.c_str(), &db));
-    return db;
-}
-
-std::pair<bool, std::string> FDBMetaStore::getValue(std::string key)
-{
-    // create transaction
-    FDBTransaction *tx;
-    exitOnError(fdb_database_create_transaction(_db, &tx));
-    FDBFuture *fget = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), 0); // not set snapshot
-    exitOnError(fdb_future_block_until_ready(fget));
-    // create future
-    fdb_bool_t key_present;
-    const uint8_t *value = NULL;
-    int value_length;
-    exitOnError(fdb_future_get_value(fget, &key_present, &value, &value_length));
-    fdb_future_destroy(fget);
-
-    bool is_found = false;
-    std::string ret_val;
-    // DEBUG
-    if (key_present)
-    {
-        is_found = true;
-        ret_val = reinterpret_cast<const char *>(value);
-        LOG(INFO)
-            << "FDBMetaStore:: getValue(); key: " << key << ", value: " << ret_val;
-    }
-    else
-    {
-        LOG(INFO) << "FDBMetaStore:: getValue(); key: " << key << ", value not found";
-    }
-
-    // destroy transaction; no need to commit read-only transaction
-    fdb_transaction_destroy(tx);
-
-    return std::pair<bool, std::string>(is_found, ret_val);
-}
-
-void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
-{
-    FDBTransaction *tx;
-    exitOnError(fdb_database_create_transaction(_db, &tx));
-
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
-
-    FDBFuture *fset = fdb_transaction_commit(tx);
-    exitOnError(fdb_future_block_until_ready(fset));
-
-    fdb_future_destroy(fset);
-
-    LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
-
-    return;
-}
-
-bool FDBMetaStore::getValueInTX(const FDBTransaction *tx, const std::string &key, std::string &value)
-{
-    if (tx == NULL)
-    {
-        LOG(ERROR) << "FDBMetaStore:: getValueInTX() invalid Transaction";
-        return false;
-    }
-
-    // Create future
-    FDBFuture *getFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), 0); // not set snapshot
-    exitOnError(fdb_future_block_until_ready(getFut));
-
-    fdb_bool_t isKeyPresent;
-    const uint8_t *valueRaw = nullptr;
-    int valueRawLength;
-
-    // block future and get raw value
-    exitOnError(fdb_future_get_value(getFut, &isKeyPresent, &valueRaw, &valueRawLength));
-    fdb_future_destroy(getFut);
-    getFut = nullptr;
-
-    // check whether the key presents
-    if (isKeyPresent)
-    {
-        // parse result as string
-        value = std::string(reinterpret_cast<const char *>(valueRaw), valueRawLength);
-        LOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found: value " << value;
-        return true;
-    }
-    else
-    {
-        LOG(INFO) << "FDBMetaStore:: getValueInTX() key " << key << "not found";
-        return false;
-    }
-}
-
-bool FDBMetaStore::parseStrToJSONObj(const std::string &str, nlohmann::json &j)
-{
-    try
-    {
-        j = nlohmann::json::parse(str);
-    }
-    catch (std::exception e)
-    {
-        LOG(ERROR) << "FDBMetaStore::parseStrToJSONObj() Error parsing JSON string: " << e.what();
-        return false;
-    }
-    return true;
+    return false;
 }
 
 int FDBMetaStore::genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[])
@@ -1314,6 +1189,21 @@ bool FDBMetaStore::genFileUuidKey(unsigned char namespaceId, boost::uuids::uuid 
 int FDBMetaStore::genChunkKeyPrefix(int chunkId, char prefix[])
 {
     return snprintf(prefix, FDB_MAX_KEY_SIZE, "c%d", chunkId);
+}
+
+int FDBMetaStore::genFileJournalKeyPrefix(char key[], unsigned char namespaceId)
+{
+    if (namespaceId == 0)
+    {
+        return snprintf(key, MAX_KEY_SIZE, "//jl");
+    }
+    return snprintf(key, MAX_KEY_SIZE, "//jl_%d", namespaceId);
+}
+
+int FDBMetaStore::genFileJournalKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[])
+{
+    int prefixLength = genFileJournalKeyPrefix(key, namespaceId);
+    return snprintf(key + prefixLength, MAX_KEY_SIZE - prefixLength, "_%*s_%d", nameLength, name, version) + prefixLength;
 }
 
 const char *FDBMetaStore::getBlockKeyPrefix(bool unique)
@@ -1506,4 +1396,134 @@ bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const
     fdb_future_destroy(cmt);
 
     return false;
+}
+
+void FDBMetaStore::exitOnError(fdb_error_t err)
+{
+    if (err)
+    {
+        LOG(ERROR) << "FoundationDB MetaStore error: " << fdb_get_error(err);
+        exit(1);
+    }
+}
+
+void *FDBMetaStore::runNetwork(void *args)
+{
+    fdb_error_t err = fdb_run_network();
+    if (err)
+    {
+        LOG(ERROR) << "FDBMetaStore::runNetwork fdb_run_network() error";
+        exit(1);
+    }
+
+    return NULL;
+}
+
+FDBDatabase *FDBMetaStore::getDatabase(std::string clusterFile)
+{
+    FDBDatabase *db;
+    exitOnError(fdb_create_database(clusterFile.c_str(), &db));
+    return db;
+}
+
+std::pair<bool, std::string> FDBMetaStore::getValue(std::string key)
+{
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+    FDBFuture *fget = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), 0); // not set snapshot
+    exitOnError(fdb_future_block_until_ready(fget));
+    // create future
+    fdb_bool_t key_present;
+    const uint8_t *value = NULL;
+    int value_length;
+    exitOnError(fdb_future_get_value(fget, &key_present, &value, &value_length));
+    fdb_future_destroy(fget);
+
+    bool is_found = false;
+    std::string ret_val;
+    // DEBUG
+    if (key_present)
+    {
+        is_found = true;
+        ret_val = reinterpret_cast<const char *>(value);
+        LOG(INFO)
+            << "FDBMetaStore:: getValue(); key: " << key << ", value: " << ret_val;
+    }
+    else
+    {
+        LOG(INFO) << "FDBMetaStore:: getValue(); key: " << key << ", value not found";
+    }
+
+    // destroy transaction; no need to commit read-only transaction
+    fdb_transaction_destroy(tx);
+
+    return std::pair<bool, std::string>(is_found, ret_val);
+}
+
+void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
+{
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
+
+    FDBFuture *fset = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(fset));
+
+    fdb_future_destroy(fset);
+
+    LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
+
+    return;
+}
+
+bool FDBMetaStore::getValueInTX(const FDBTransaction *tx, const std::string &key, std::string &value)
+{
+    if (tx == NULL)
+    {
+        LOG(ERROR) << "FDBMetaStore:: getValueInTX() invalid Transaction";
+        return false;
+    }
+
+    // Create future
+    FDBFuture *getFut = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), 0); // not set snapshot
+    exitOnError(fdb_future_block_until_ready(getFut));
+
+    fdb_bool_t isKeyPresent;
+    const uint8_t *valueRaw = nullptr;
+    int valueRawLength;
+
+    // block future and get raw value
+    exitOnError(fdb_future_get_value(getFut, &isKeyPresent, &valueRaw, &valueRawLength));
+    fdb_future_destroy(getFut);
+    getFut = nullptr;
+
+    // check whether the key presents
+    if (isKeyPresent)
+    {
+        // parse result as string
+        value = std::string(reinterpret_cast<const char *>(valueRaw), valueRawLength);
+        LOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found: value " << value;
+        return true;
+    }
+    else
+    {
+        LOG(INFO) << "FDBMetaStore:: getValueInTX() key " << key << "not found";
+        return false;
+    }
+}
+
+bool FDBMetaStore::parseStrToJSONObj(const std::string &str, nlohmann::json &j)
+{
+    try
+    {
+        j = nlohmann::json::parse(str);
+    }
+    catch (std::exception e)
+    {
+        LOG(ERROR) << "FDBMetaStore::parseStrToJSONObj() Error parsing JSON string: " << e.what();
+        return false;
+    }
+    return true;
 }

@@ -221,6 +221,7 @@ private:
     void setValueInTX(const FDBTransaction *tx, const std::string &key, std::string &value);
 
     // helper functions (mostly copied from RedisMetaStore)
+    bool markFileStatus(const File &file, const char *listName, bool set, const char *opName);
     bool markFileRepairStatus(const File &file, bool needsRepair);
     int genFileKey(unsigned char namespaceId, const char *name, int nameLength, char key[]);
     int genVersionedFileKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]);
@@ -229,6 +230,8 @@ private:
     int genChunkKeyPrefix(int chunkId, char prefix[]);
     const char *getBlockKeyPrefix(bool unique);
     int genBlockKey(int blockId, char prefix[], bool unqiue);
+    int genFileJournalKeyPrefix(char key[], unsigned char namespaceId = 0);
+    int genFileJournalKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]);
 
     bool getFileName(char fileUuidKey[], File &f);
     bool isSystemKey(const char *key);
