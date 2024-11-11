@@ -12,8 +12,7 @@
 #include "../../common/define.hh"
 
 // change defs's prefix to FDB_
-#define FDB_NUM_RESERVED_SYSTEM_KEYS (8)
-#define FDB_COMMON_KEY_PREFIX "//sncc"
+#define FDB_NUM_RESERVED_SYSTEM_KEYS (9)
 #define FDB_FILE_LOCK_KEY "//snccFLock"
 #define FDB_FILE_PIN_STAGED_KEY "//snccFPinStaged"
 #define FDB_FILE_REPAIR_KEY "//snccFRepair"
@@ -22,10 +21,12 @@
 #define FDB_BG_TASK_PENDING_KEY "//snccFBgTask"
 #define FDB_DIR_LIST_KEY "//snccDirList"
 #define FDB_JL_LIST_KEY "//snccJournalFSet"
-#define FDB_FILE_PREFIX_KEY "//pf_"
+// new keys
+#define FDB_NUM_FILES_KEY "//snccFSize"
 
 #define FDB_MAX_KEY_SIZE (64)
 #define FDB_NUM_REQ_FIELDS (10)
+#define FDB_FILE_PREFIX "//pf_"
 
 static std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char *field, size_t fieldLength);
 
@@ -1312,12 +1313,12 @@ std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
     // the location of first '_' (to locate namespace)
     const char *us = strchr(name, '_');
 
-    std::string filePrefix(FDB_FILE_PREFIX_KEY);
+    std::string filePrefix(FDB_FILE_PREFIX);
     // file on root directory (namespace_filename), or root directory (ends
     // with one '/' (namespace_/))
     if (slash == NULL || us + 1 == slash)
     {
-        // set filePrefix to "FDB_FILE_PREFIX_KEY<namesapce>_"
+        // set filePrefix to "FDB_FILE_PREFIX<namesapce>_"
         filePrefix.append(name, us - name + 1);
         // append a slash at the end
         return noEndingSlash ? filePrefix : filePrefix.append("/");
