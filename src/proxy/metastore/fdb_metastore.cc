@@ -75,12 +75,14 @@ bool FDBMetaStore::putMeta(const File &f)
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
 
+    Config &config = Config::getInstance(); 
+
     // create a file version summary
     // format: "size mtime md5 isDeleted numChunks"
     std::string fVerSummary;
     fVerSummary.append(std::to_string(f.size).append(" "));
     fVerSummary.append(std::to_string(f.mtime).append(" "));
-    fVerSummary.append(std::string(f.md5, MD5_DIGEST_LENGTH).append(" "));
+    fVerSummary.append(std::string(reinterpret_cast<const char *>(f.md5), MD5_DIGEST_LENGTH).append(" "));
     fVerSummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" "));
     fVerSummary.append(std::to_string(f.numChunks));
 
@@ -121,7 +123,8 @@ bool FDBMetaStore::putMeta(const File &f)
             // clear all previous versions in FDB
             for (auto prevVerFileKey : fmj["verName"])
             {
-                fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(prevVerFileKey.c_str()), prevVerFileKey.size());
+                std::string keyStr = prevVerFileKey.get<std::string>();
+                fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(keyStr.c_str()), keyStr.size());
             }
 
             // only keep the input file version
@@ -137,10 +140,10 @@ bool FDBMetaStore::putMeta(const File &f)
             // if the version is not stored, insert it in ascending order
             if (fmj["verId"].find(verFileKey) == fmj["verId"].end())
             {
-                int pos;
+                size_t pos;
                 for (pos = 0; pos < fmj["verId"].size(); pos++)
                 {
-                    if (f.version < fmj["verId"].get<int>(i))
+                    if (f.version < fmj["verId"][pos].get<int>())
                     {
                         break;
                     }
@@ -190,7 +193,7 @@ bool FDBMetaStore::putMeta(const File &f)
     verFmj["atime"] = std::to_string(f.atime);
     verFmj["mtime"] = std::to_string(f.mtime);
     verFmj["tctime"] = std::to_string(f.tctime);
-    verFmj["md5"] = std::string(f.md5, MD5_DIGEST_LENGTH);
+    verFmj["md5"] = std::string(reinterpret_cast<const char *>(f.md5), MD5_DIGEST_LENGTH);
     verFmj["sg_size"] = std::to_string(f.staged.size);
     verFmj["sg_sc"] = f.staged.storageClass;
     verFmj["sg_cs"] = std::to_string(f.staged.codingMeta.coding);
@@ -213,7 +216,7 @@ bool FDBMetaStore::putMeta(const File &f)
         std::string csizeKey = std::string(chunkName) + std::string("-size");
         verFmj[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
         std::string cmd5Key = std::string(chunkName) + std::string("-md5");
-        verFmj[cmd5Key.c_str()] = std::string(f.chunks[i].md5, MD5_DIGEST_LENGTH);
+        verFmj[cmd5Key.c_str()] = std::string(reinterpret_cast<const char *>(f.chunks[i].md5), MD5_DIGEST_LENGTH);
         std::string cmd5Bad = std::string(chunkName) + std::string("-bad");
         verFmj[cmd5Bad.c_str()] = std::to_string((f.chunksCorrupted ? f.chunksCorrupted[i] : 0));
     }
@@ -389,8 +392,8 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     size_t numUniqueBlocks = 0, numDuplicateBlocks = 0;
 
     // find metadata for current file version
-    std::string verFmjStr;
-    bool verFmjExist = getValueInTX(tx, verFileKey, verFmjStr);
+    std::string verFileMetaStr;
+    bool verFileMetaExist = getValueInTX(tx, verFileKey, verFileMetaStr);
     if (verFileMetaExist == false)
     {
         LOG(ERROR) << "FDBMetaStore::getMeta() failed to find version in MetaStore, file: " << f.name << ", version: " << f.version;
@@ -399,7 +402,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     nlohmann::json *verFmjPtr = new nlohmann::json();
     auto &verFmj = *verFmjPtr;
-    if (parseStrToJSONObj(verFmjStr, verFmj) == false)
+    if (parseStrToJSONObj(verFileMetaStr, verFmj) == false)
     {
         exit(1);
     }
@@ -428,7 +431,25 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     f.codingMeta.k = verFmj["k"].get<int>();
     f.codingMeta.f = verFmj["f"].get<int>();
     f.codingMeta.maxChunkSize = verFmj["maxCS"].get<int>();
-    f.staged.mtime = verFmj["sg_mtime"].get<time_t>();
+    f.codingMeta.codingStateSize = verFmj["codingStateS"].get<int>();
+    if (f.codingMeta.codingStateSize > 0) {
+        f.codingMeta.codingState = new unsigned char[f.codingMeta.codingStateSize];
+        memcpy(f.codingMeta.codingState, verFmj["codingState"].get<std::string>().c_str(), f.codingMeta.codingStateSize)
+    }
+    f.version = verFmj["ver"].get<int>();
+    f.ctime = verFmj["ctime"].get<time_t>();
+    f.atime = verFmj["atime"].get<time_t>();
+    f.mtime = verFmj["mtime"].get<time_t>();
+    f.tctime = verFmj["tctime"].get<time_t>();
+    memcpy(f.md5, reinterpret_cast<const unsigned char *>(verFmj["md5"].get<std::string>().c_str()), MD5_DIGEST_LENGTH);
+    f.staged.size = verFmj["sg_size"].get<int>();
+    f.staged.storageClass = verFmj["sg_sc"].get<std::string>();
+    f.staged.codingMeta.maxChunkSize = verFmj["sg_cs"].get<int>();
+    f.staged.codingMeta.n = verFmj["sg_n"].get<int>();
+    f.staged.codingMeta.k = verFmj["sg_k"].get<int>();
+    f.staged.codingMeta.f = verFmj["sg_f"].get<int>();
+    f.staged.codingMeta.maxChunkSize = verFmj["sg_maxCS"].get<int>();
+    f.codingMeta.codingStateSutaged.mtime = verFmj["sg_mtime"].get<time_t>();
     f.isDeleted = verFmj["dm"].get<bool>();
     numUniqueBlocks = verFmj["numUB"].get<int>();
     numDuplicateBlocks = verFmj["numDB"].get<int>();
@@ -451,7 +472,8 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
         f.containerIds[chunkId] = std::stoi(verFmj[cidKey.c_str()].get<std::string>());
         f.chunks[chunkId].size = std::stoi(verFmj[csizeKey.c_str()].get<std::string>());
-        f.chunks[chunkId].md5 = std::string(verFmj[cmd5Key.c_str()].get<std::string>().c_str(), MD5_DIGEST_LENGTH);
+        std::string md5str = std::string(verFmj[cmd5Key.c_str()].get<std::string>().c_str(), MD5_DIGEST_LENGTH);
+        memcpy(f.chunks[chunkId].md5, reinterpret_cast<const unsigned char *>(md5str.c_str()), MD5_DIGEST_LENGTH);
         f.chunksCorrupted[chunkId] = std::stoi(verFmj[cbadKey.c_str()].get<std::string>()); // TODO: double check this field; make sure it's correct
         f.chunks[chunkId].setId(f.namespaceId, f.uuid, chunkId);
         f.chunks[chunkId].data = 0;

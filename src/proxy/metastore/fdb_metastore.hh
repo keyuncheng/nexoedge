@@ -188,7 +188,7 @@ private:
     void exitOnError(fdb_error_t err);
     static void *runNetwork(void *args);
     FDBDatabase *getDatabase(std::string clusterFile);
-    std::pair<bool, const> getValue(std::string key);
+    std::pair<bool, std::string> getValue(std::string key);
     void setValueAndCommit(std::string key, std::string value);
     // FDB operations in Transaction
 
