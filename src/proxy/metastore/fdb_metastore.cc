@@ -338,6 +338,8 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     // versioned file key
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
+    
+    DLOG(INFO) << fileKeyLength << " " << verFileKeyLength;
 
     // create transaction
     FDBTransaction *tx;
@@ -434,7 +436,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     f.codingMeta.codingStateSize = verFmj["codingStateS"].get<int>();
     if (f.codingMeta.codingStateSize > 0) {
         f.codingMeta.codingState = new unsigned char[f.codingMeta.codingStateSize];
-        memcpy(f.codingMeta.codingState, verFmj["codingState"].get<std::string>().c_str(), f.codingMeta.codingStateSize)
+        memcpy(f.codingMeta.codingState, verFmj["codingState"].get<std::string>().c_str(), f.codingMeta.codingStateSize);
     }
     f.version = verFmj["ver"].get<int>();
     f.ctime = verFmj["ctime"].get<time_t>();
@@ -449,7 +451,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     f.staged.codingMeta.k = verFmj["sg_k"].get<int>();
     f.staged.codingMeta.f = verFmj["sg_f"].get<int>();
     f.staged.codingMeta.maxChunkSize = verFmj["sg_maxCS"].get<int>();
-    f.codingMeta.codingStateSutaged.mtime = verFmj["sg_mtime"].get<time_t>();
+    f.staged.mtime = verFmj["sg_mtime"].get<time_t>();
     f.isDeleted = verFmj["dm"].get<bool>();
     numUniqueBlocks = verFmj["numUB"].get<int>();
     numDuplicateBlocks = verFmj["numDB"].get<int>();
@@ -488,10 +490,10 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     if (getBlocks == 1 || getBlocks == 3)
     { // unique blocks
-        int pOffset = 0;
-        int noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
-        int hasFpOfs = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
-        int lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH + sizeof(int);
+        size_t pOffset = 0;
+        size_t noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
+        size_t hasFpOfs = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
+        size_t lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH + sizeof(int);
         for (size_t blockId = 0; blockId < numUniqueBlocks; blockId++)
         {
             genBlockKey(blockId, blockName, /* is unique */ true);
@@ -500,11 +502,13 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
             loc._length = std::stoull(blockStr.substr(pOffset + sizeof(unsigned long int), sizeof(unsigned int)));
             if (verFmj[std::string(blockName).c_str()].size() >= lengthWithFp)
             {
-                fp.set(blockStr.substr(pOffset + hasFpOfs, SHA256_DIGEST_LENGTH).c_str());
+                std::string fpStr = blockStr.substr(pOffset + hasFpOfs, SHA256_DIGEST_LENGTH);
+                fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
             }
             else
             {
-                fp.set(blockStr.substr(pOffset + noFpOfs, SHA256_DIGEST_LENGTH).c_str());
+                std::string fpStr = blockStr.substr(pOffset + noFpOfs, SHA256_DIGEST_LENGTH);
+                fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
             }
 
             auto followIt = f.uniqueBlocks.end(); // hint is the item after the element to insert for c++11, and before the element for c++98
@@ -514,19 +518,20 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     if (getBlocks == 2 || getBlocks == 3)
     { // duplicate blocks
-        int noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
-        int lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
+        size_t noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
+        size_t lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
 
         for (size_t blockId = 0; blockId < numDuplicateBlocks; blockId++)
         {
             genBlockKey(blockId, blockName, /* is unique */ false);
 
-            loc._offset = std::stoull(verFmj[std::string(blockName).c_str()].substr(0, sizeof(unsigned long int)));
-            loc._length = std::stoull(verFmj[std::string(blockName).c_str()].substr(sizeof(unsigned long int), sizeof(unsigned int)));
+            loc._offset = std::stoull(verFmj[std::string(blockName).c_str()].get<std::string>().substr(0, sizeof(unsigned long int)));
+            loc._length = std::stoull(verFmj[std::string(blockName).c_str()].get<std::string>().substr(sizeof(unsigned long int), sizeof(unsigned int)));
 
             if (verFmj[std::string(blockName).c_str()].size() >= lengthWithFp)
             {
-                fp.set(verFmj[std::string(blockName).c_str()].substr(noFpOfs, SHA256_DIGEST_LENGTH).c_str());
+                std::string fpStr = verFmj[std::string(blockName).c_str()].get<std::string>().substr(noFpOfs, SHA256_DIGEST_LENGTH);
+                fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
             }
 
             auto followIt = f.duplicateBlocks.end(); // hint is the item after the element to insert for c++11, and before the element for c++98
