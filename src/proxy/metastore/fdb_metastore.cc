@@ -32,7 +32,6 @@ static std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char 
 
 FDBMetaStore::FDBMetaStore()
 {
-    // didn't use for now
     Config &config = Config::getInstance();
 
     LOG(INFO) << "FDBMetaStore::FDBMetaStore() MetaStoreType: " << config.getProxyMetaStoreType();
@@ -555,13 +554,14 @@ bool FDBMetaStore::deleteMeta(File &f)
 {
     std::lock_guard<std::mutex> lk(_lock);
 
+    Config &config = Config::getInstance();
+
     char fileKey[PATH_MAX], verFileKey[PATH_MAX];
 
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
 
     int versionToDelete = f.version;
-    std::string filePrefix = getFilePrefix(fileKey);
 
     bool isVersioned = !config.overwriteFiles();
     bool lazyDeletion = false;
@@ -617,7 +617,7 @@ bool FDBMetaStore::deleteMeta(File &f)
     // delete a specific version
     if (isVersioned && versionToDelete != -1)
     {
-        int curVersion = fmj["verId"].back();
+        // int curVersion = fmj["verId"].back().get<int>();
         int numVersions = fmj["verId"].size();
 
         if (numVersions == 0)
@@ -671,7 +671,7 @@ bool FDBMetaStore::deleteMeta(File &f)
     f.genUUID();
 
     // remove file uuid key
-    if (!genFileUuidKey(f.namespaceId, f.uuid, fidKey))
+    if (!genFileUuidKey(f.namespaceId, f.uuid, fUuidKey))
     {
         LOG(WARNING) << "File uuid" << boost::uuids::to_string(f.uuid) << " is too long to generate a reverse key mapping";
     }
@@ -792,14 +792,8 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     // parse fileMeta as JSON object
     nlohmann::json *fmjPtr = new nlohmann::json();
     auto &fmj = *fmjPtr;
-    try
+    if (parseStrToJSONObj(fileMetaStr, fmj) == false)
     {
-        std::string filMetaStr(reinterpret_cast<const char *>(fileMetaRaw));
-        fmj = nlohmann::json::parse(filMetaStr);
-    }
-    catch (std::exception e)
-    {
-        LOG(ERROR) << "FDBMetaStore::putMeta() Error parsing JSON string: " << e.what();
         exit(1);
     }
 
@@ -816,7 +810,7 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
 
     // set dstFileUuidKey; remove the original sfidKey (check putMeta impl)
     // insert new metadata
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileUuidKey), FDB_MAX_KEY_SIZE + 64, dstFileKey, dstFileKeyLength);
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileUuidKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(dstFileKey), dstFileKeyLength);
 
     DLOG(INFO) << "FDBMetaStore::renameMeta() Add reverse mapping (" << dstFileUuidKey << ") for file " << dstFileKey;
 
@@ -890,6 +884,8 @@ bool FDBMetaStore::updateTimestamps(const File &f)
     char fileKey[PATH_MAX];
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
 
+    DLOG(INFO) << fileKeyLength;
+
     // update the latest version
 
     // create transaction
@@ -948,7 +944,7 @@ bool FDBMetaStore::updateTimestamps(const File &f)
 
     // serialize json to string and store in FDB
     std::string vfmjStr = vfmj.dump();
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKey.size(), reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey.c_str()), verFileKey.size(), reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
     delete vfmjPtr;
 
     // commit transaction
@@ -968,6 +964,8 @@ int FDBMetaStore::updateChunks(const File &f, int version)
     char fileKey[PATH_MAX];
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
 
+    DLOG(INFO) << fileKeyLength;
+    
     // update the latest version
 
     // create transaction
@@ -1034,7 +1032,7 @@ int FDBMetaStore::updateChunks(const File &f, int version)
 
     // serialize json to string and store in FDB
     std::string vfmjStr = vfmj.dump();
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKey.size(), reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey.size()), verFileKey.size(), reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
     delete vfmjPtr;
 
     // commit transaction
@@ -1102,20 +1100,20 @@ bool FDBMetaStore::markFileAsNeedsRepair(const File &file)
     return markFileRepairStatus(file, false);
 }
 
-bool RedisMetaStore::markFileRepairStatus(const File &file, bool needsRepair)
+bool FDBMetaStore::markFileRepairStatus(const File &file, bool needsRepair)
 {
     return markFileStatus(file, FDB_FILE_REPAIR_KEY, needsRepair, "repair");
 }
 
 bool FDBMetaStore::markFileAsPendingWriteToCloud(const File &file)
 {
-    return markFileStatus(file, FILE_PENDING_WRITE_KEY, true, "pending write to cloud");
+    return markFileStatus(file, FDB_FILE_PENDING_WRITE_KEY, true, "pending write to cloud");
 }
 
 bool FDBMetaStore::markFileAsWrittenToCloud(const File &file, bool removePending)
 {
-    return markFileStatus(file, FILE_PENDING_WRITE_COMP_KEY, false, "pending completing write to cloud") &&
-           (!removePending || markFileStatus(file, FILE_PENDING_WRITE_KEY, false, "pending write to cloud"));
+    return markFileStatus(file, FDB_FILE_PENDING_WRITE_COMP_KEY, false, "pending completing write to cloud") &&
+           (!removePending || markFileStatus(file, FDB_FILE_PENDING_WRITE_KEY, false, "pending write to cloud"));
 }
 
 bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool set, const char *opName)
@@ -1223,15 +1221,15 @@ int FDBMetaStore::genFileJournalKeyPrefix(char key[], unsigned char namespaceId)
 {
     if (namespaceId == 0)
     {
-        return snprintf(key, MAX_KEY_SIZE, "//jl");
+        return snprintf(key, FDB_MAX_KEY_SIZE, "//jl");
     }
-    return snprintf(key, MAX_KEY_SIZE, "//jl_%d", namespaceId);
+    return snprintf(key, FDB_MAX_KEY_SIZE, "//jl_%d", namespaceId);
 }
 
 int FDBMetaStore::genFileJournalKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[])
 {
     int prefixLength = genFileJournalKeyPrefix(key, namespaceId);
-    return snprintf(key + prefixLength, MAX_KEY_SIZE - prefixLength, "_%*s_%d", nameLength, name, version) + prefixLength;
+    return snprintf(key + prefixLength, FDB_MAX_KEY_SIZE - prefixLength, "_%*s_%d", nameLength, name, version) + prefixLength;
 }
 
 const char *FDBMetaStore::getBlockKeyPrefix(bool unique)
@@ -1308,7 +1306,7 @@ bool FDBMetaStore::getFileName(char fileUuidKey[], File &f)
     f.name = (char *)malloc(f.nameLength + 1);
     strncpy(f.name, fileKeyStr.c_str(), f.nameLength);
     f.name[f.nameLength] = 0;
-    delete fileKeyj;
+    delete fileKeyPtr;
 
     // commit transaction and return
     FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -1368,8 +1366,10 @@ bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const
 {
     char fileKey[PATH_MAX];
 
-    int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
+    int fileKeyLength = genFileKey(file.namespaceId, file.name, file.nameLength, fileKey);
 
+    DLOG(INFO) << fileKeyLength;
+    
     std::string lockListName(type);
 
     // create transaction
@@ -1506,7 +1506,7 @@ void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
     return;
 }
 
-bool FDBMetaStore::getValueInTX(const FDBTransaction *tx, const std::string &key, std::string &value)
+bool FDBMetaStore::getValueInTX(FDBTransaction *tx, const std::string &key, std::string &value)
 {
     if (tx == NULL)
     {
@@ -1548,9 +1548,10 @@ bool FDBMetaStore::parseStrToJSONObj(const std::string &str, nlohmann::json &j)
     {
         j = nlohmann::json::parse(str);
     }
-    catch (std::exception e)
+    catch (const nlohmann::json::parse_error& e)
     {
-        LOG(ERROR) << "FDBMetaStore::parseStrToJSONObj() Error parsing JSON string: " << e.what();
+        LOG(ERROR) << "FDBMetaStore::parseStrToJSONObj() Error parsing JSON string: " << e.what() << ", exception id: " << e.id << '\n'
+                  << "byte position of error: " << e.byte << std::endl;;
         return false;
     }
     return true;

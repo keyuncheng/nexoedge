@@ -200,7 +200,7 @@ private:
      * @param value value
      * @return bool whether value exists
      */
-    bool getValueInTX(const FDBTransaction *tx, const std::string &key, std::string &value);
+    bool getValueInTX(FDBTransaction *tx, const std::string &key, std::string &value);
 
     /**
      * @brief parse raw string to JSON object
@@ -229,6 +229,7 @@ private:
     std::string getFilePrefix(const char name[], bool noEndingSlash = false);
     int genChunkKeyPrefix(int chunkId, char prefix[]);
     const char *getBlockKeyPrefix(bool unique);
+    bool getNameFromFileKey(const char *str, size_t len, char **name, int &nameLength, unsigned char &namespaceId, int *version = 0);
     int genBlockKey(int blockId, char prefix[], bool unqiue);
     int genFileJournalKeyPrefix(char key[], unsigned char namespaceId = 0);
     int genFileJournalKey(unsigned char namespaceId, const char *name, int nameLength, int version, char key[]);
