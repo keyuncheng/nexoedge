@@ -627,7 +627,7 @@ bool FDBMetaStore::deleteMeta(File &f)
         }
 
         // check whether the version exists in version list
-        auto it = fmj["verId"].find(versionToDelete);
+        auto it = fmj["verId"].find(std::to_string(versionToDelete));
         if (it == fmj["verId"].end())
         {
             // handle error
