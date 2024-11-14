@@ -4,6 +4,8 @@
 
 **Nexoedge is a multi-cloud storage system that employs erasure coding for data protection**. It applies a network-coding-inspired data repair technique on erasure coding for improved repair performance and supports major cloud storage providers as storage destinations. Nexoedge enables applications to seamlessly utilize storage services by major cloud storage providers as a unified reliable and storage-efficient storage pool.
 
+[Nexoedge is an *at-large* stage project under the Linux Foundation Edge.](https://lfedge.org/projects/nexoedge/)
+
 ## Overview
 
 The system consists of two key entities: *proxy* and *agent*.
@@ -71,6 +73,10 @@ Nexoedge exports an SMB interface by extending [Samba][samba].
 The Samba server communicates with Nexoedge via TCP/IP sockets. 
 
 See the [build and installation guide](INSTALL.md) for the installation instructions.
+
+### Data Repair
+
+Nexoedge supports both proxy-side and agent-side data repair. System administrators can configure either option in the proxy configuration file.
 
 ### System Monitoring Tools
 
