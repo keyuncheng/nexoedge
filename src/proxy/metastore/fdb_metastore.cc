@@ -81,6 +81,7 @@ bool FDBMetaStore::putMeta(const File &f)
     std::string fVerSummary;
     fVerSummary.append(std::to_string(f.size).append(" "));
     fVerSummary.append(std::to_string(f.mtime).append(" "));
+    // convert md5 to string
     fVerSummary.append(std::string(reinterpret_cast<const char *>(f.md5), MD5_DIGEST_LENGTH).append(" "));
     fVerSummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" "));
     fVerSummary.append(std::to_string(f.numChunks));
@@ -100,7 +101,7 @@ bool FDBMetaStore::putMeta(const File &f)
     { // No file meta: init the new version
         // version id: (TODO: check correctness when f.version == -1)
         fmj["verId"] = nlohmann::json::array();
-        fmj["verId"].push_back(f.version);
+        fmj["verId"].push_back(std::to_string(f.version));
         // version name
         fmj["verName"] = nlohmann::json::array();
         fmj["verName"].push_back(verFileKey);
@@ -155,7 +156,7 @@ bool FDBMetaStore::putMeta(const File &f)
     }
 
     // Store file meta into FDB
-    std::string fmjStr = fmj.dump();
+    std::string fmjStr = fmj.dump(-1, ' ', false, nlohmann::json::error_handler_t::ignore);
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
     delete fmjPtr;
 
@@ -239,7 +240,7 @@ bool FDBMetaStore::putMeta(const File &f)
         verFmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
     }
 
-    std::string verFmjStr = verFmj.dump();
+    std::string verFmjStr = verFmj.dump(-1, ' ', false, nlohmann::json::error_handler_t::ignore);
     // Store versioned file meta into FDB
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(verFmjStr.c_str()), verFmjStr.size());
     delete verFmjPtr;
@@ -258,11 +259,11 @@ bool FDBMetaStore::putMeta(const File &f)
     // add filename to file Prefix Set
     std::string filePrefix = getFilePrefix(fileKey);
     std::string fPrefixListStr;
-    bool fPrefixSetExist = getValueInTX(tx, filePrefix, fPrefixListStr);
+    bool fPrefixListExist = getValueInTX(tx, filePrefix, fPrefixListStr);
 
     nlohmann::json *fpljPtr = new nlohmann::json();
     auto &fplj = *fpljPtr;
-    if (fPrefixSetExist == false)
+    if (fPrefixListExist == false)
     {
         // create the set and add the fileKey
         fplj["list"] = nlohmann::json::array();
@@ -280,7 +281,7 @@ bool FDBMetaStore::putMeta(const File &f)
             fplj["list"].push_back(fileKey);
         }
     }
-    std::string fpljStr = fplj.dump();
+    std::string fpljStr = fplj.dump(-1, ' ', false, nlohmann::json::error_handler_t::ignore);
     delete fpljPtr;
 
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(fpljStr.c_str()), fpljStr.size());
@@ -311,7 +312,7 @@ bool FDBMetaStore::putMeta(const File &f)
         }
     }
 
-    std::string dljStr = dlj.dump();
+    std::string dljStr = dlj.dump(-1, ' ', false, nlohmann::json::error_handler_t::ignore);
     delete dljPtr;
 
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(dljStr.c_str()), dljStr.size());
@@ -338,7 +339,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     // versioned file key
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
     
-    DLOG(INFO) << fileKeyLength << " " << verFileKeyLength;
+    DLOG(INFO) << "DLOG: " << fileKeyLength << " " << verFileKeyLength;
 
     // create transaction
     FDBTransaction *tx;
@@ -362,11 +363,13 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     // parse fileMeta as JSON object
     nlohmann::json *fmjPtr = new nlohmann::json();
     auto &fmj = *fmjPtr;
+
     if (parseStrToJSONObj(fileMetaStr, fmj) == false)
     {
         exit(1);
     }
 
+    // check file version
     if (f.version == -1)
     { // version not specified: retrieved the latest version
         std::string lastVerFileKey = fmj["verName"].back().get<std::string>();
@@ -408,6 +411,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         exit(1);
     }
 
+    // TODO: resume here
     // parse fields
     f.size = verFmj["size"].get<unsigned long>();
     f.numChunks = verFmj["numC"].get<int>();
@@ -1537,7 +1541,7 @@ bool FDBMetaStore::getValueInTX(FDBTransaction *tx, const std::string &key, std:
     }
     else
     {
-        LOG(INFO) << "FDBMetaStore:: getValueInTX() key " << key << "not found";
+        LOG(INFO) << "FDBMetaStore:: getValueInTX() key " << key << " not found";
         return false;
     }
 }
