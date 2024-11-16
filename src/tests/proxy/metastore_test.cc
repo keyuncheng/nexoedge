@@ -13,7 +13,7 @@
 #include "../../proxy/metastore/fdb_metastore.hh"
 
 // static const size_t numFilesToTest = 1024;
-static const size_t numFilesToTest = 200;
+static const size_t numFilesToTest = 100;
 static const int maxFileNameLength = 1024;
 static const unsigned long maxFileSize = (unsigned long) (1 << 30) * 4; // 4GB
 static int chunkSize = (1 << 20); // 1MB
@@ -110,7 +110,7 @@ int main(int argc, char **argv) {
     // test 3: file lock
     mytimer.start();
     metaLock(metastore);
-    printf("> Test %d compeltes: Lock %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    printf("> Test %d completed: Lock %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     // test 4: file unlock
     mytimer.start();

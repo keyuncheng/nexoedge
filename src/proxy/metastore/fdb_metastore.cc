@@ -140,7 +140,7 @@ bool FDBMetaStore::putMeta(const File &f)
         else
         {
             // if the version is not stored, insert it in ascending order
-            if (fmj["verId"].find(verFileKey) == fmj["verId"].end())
+            if (std::find(fmj["verId"].begin(), fmj["verId"].end(), std::string(verFileKey, verFileKeyLength)) == fmj["verId"].end())
             {
                 size_t pos;
                 for (pos = 0; pos < fmj["verId"].size(); pos++)
@@ -282,9 +282,9 @@ bool FDBMetaStore::putMeta(const File &f)
         {
             exit(1);
         }
-        if (fplj["list"].find(fileKey) == fplj["list"].end())
+        if (std::find(fplj["list"].begin(), fplj["list"].end(), std::string(fileKey, fileKeyLength)) == fplj["list"].end())
         {
-            fplj["list"].push_back(fileKey);
+            fplj["list"].push_back(std::string(fileKey, fileKeyLength));
         }
     }
     std::string fpljStr = fplj.dump();
@@ -312,7 +312,7 @@ bool FDBMetaStore::putMeta(const File &f)
         {
             exit(1);
         }
-        if (dlj["list"].find(filePrefix) == dlj["list"].end())
+        if (std::find(dlj["list"].begin(), dlj["list"].end(), filePrefix) == dlj["list"].end())
         {
             dlj["list"].push_back(filePrefix);
         }
@@ -383,7 +383,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     else
     { // versioned file
         // check whether the file version exists
-        if (fmj["verName"].find(verFileKey) == fmj["verName"].end())
+        if (std::find(fmj["verName"].begin(), fmj["verName"].end(), std::string(verFileKey, verFileKeyLength)) == fmj["verName"].end())
         {
             LOG(WARNING) << "FDBMetaStore::getMeta() file version not exists, file: " << f.name << ", version: " << f.version;
 
@@ -637,7 +637,7 @@ bool FDBMetaStore::deleteMeta(File &f)
         }
 
         // check whether the version exists in version list
-        auto it = fmj["verId"].find(std::to_string(versionToDelete));
+        auto it = std::find(fmj["verId"].begin(), fmj["verId"].end(), versionToDelete);
         if (it == fmj["verId"].end())
         {
             // handle error
@@ -707,7 +707,7 @@ bool FDBMetaStore::deleteMeta(File &f)
     }
 
     // remove fileKey from the list
-    auto it = fplj["list"].find(fileKey);
+    auto it = std::find(fplj["list"].begin(), fplj["list"].end(), std::string(fileKey, fileKeyLength));
     if (it != fplj["list"].end())
     {
         fplj["list"].erase(it);
@@ -739,7 +739,7 @@ bool FDBMetaStore::deleteMeta(File &f)
         }
 
         // remove filePrefix from the list
-        auto it = dlj["list"].find(filePrefix);
+        auto it = std::find(dlj["list"].begin(), dlj["list"].end(), filePrefix);
         if (it != dlj["list"].end())
         {
             dlj["list"].erase(it);
@@ -1375,11 +1375,8 @@ bool FDBMetaStore::pinStagedFile(const File &file, bool lock)
 bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const char *name)
 {
     char fileKey[PATH_MAX];
-
     int fileKeyLength = genFileKey(file.namespaceId, file.name, file.nameLength, fileKey);
 
-    DLOG(INFO) << fileKeyLength;
-    
     std::string lockListName(type);
 
     // create transaction
@@ -1390,17 +1387,25 @@ bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const
     std::string lockListStr;
     bool lockListExist = getValueInTX(tx, lockListName, lockListStr);
 
+    // unlock but lock list not exist
+    if (lock == false && lockListExist == false) {
+        // commit transaction and return
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return false;
+    }
+
+    bool retVal = false;
     nlohmann::json *lljPtr = new nlohmann::json();
     auto &llj = *lljPtr;
     if (lockListExist == false)
     {
         // create the set and add the fileKey
         llj["list"] = nlohmann::json::array();
-
-        if (lock == true)
-        {
-            llj["list"].push_back(fileKey);
-        }
+        llj["list"].push_back(std::string(fileKey, fileKeyLength));
+        retVal = true;
     }
     else
     {
@@ -1409,18 +1414,22 @@ bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const
             exit(1);
         }
 
+        bool lockExist = (std::find(llj["list"].begin(), llj["list"].end(), std::string(fileKey, fileKeyLength)) != llj["list"].end());
+
         if (lock == true)
-        {
-            if (llj["list"].find(fileKey) == llj["list"].end())
+        { // lock
+            if (lockExist == false)
             {
-                llj["list"].push_back(fileKey);
+                llj["list"].push_back(std::string(fileKey, fileKeyLength));
+                retVal = true;
             }
         }
         else
-        {
-            if (llj["list"].find(fileKey) != llj["list"].end())
+        { // unlock
+            if (lockExist == true)
             {
-                llj["list"].erase(std::remove(llj["list"].begin(), llj["list"].end(), fileKey), llj["list"].end());
+                llj["list"].erase(std::remove(llj["list"].begin(), llj["list"].end(), std::string(fileKey, fileKeyLength)), llj["list"].end());
+                retVal = true;
             }
         }
     }
@@ -1433,7 +1442,7 @@ bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    return false;
+    return retVal;
 }
 
 void FDBMetaStore::exitOnError(fdb_error_t err)
