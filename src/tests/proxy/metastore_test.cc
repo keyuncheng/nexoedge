@@ -13,7 +13,7 @@
 #include "../../proxy/metastore/fdb_metastore.hh"
 
 // static const size_t numFilesToTest = 1024;
-static const size_t numFilesToTest = 100;
+static const size_t numFilesToTest = 2;
 static const int maxFileNameLength = 1024;
 static const unsigned long maxFileSize = (unsigned long) (1 << 30) * 4; // 4GB
 static int chunkSize = (1 << 20); // 1MB
@@ -117,15 +117,15 @@ int main(int argc, char **argv) {
     metaUnlock(metastore);
     printf("> Test %d completed: Unlock %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
-    // test 5: file listing
-    mytimer.start();
-    metaList(metastore);
-    printf("> Test %d completed: List %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    // // test 5: file listing
+    // mytimer.start();
+    // metaList(metastore);
+    // printf("> Test %d completed: List %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
-    // test 6: file repair list
-    mytimer.start();
-    metaForRepair(metastore);
-    printf("> Test %d completed: Mark and unmark %lu files for repair in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    // // test 6: file repair list
+    // mytimer.start();
+    // metaForRepair(metastore);
+    // printf("> Test %d completed: Mark and unmark %lu files for repair in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     // test 7: file renaming
     mytimer.start();
@@ -586,7 +586,7 @@ void metaUpdate(MetaStore* metastore) {
 
 void metaLock(MetaStore *metastore) {
     // suppress error message due to failed file locking attempts
-    fclose(stderr);
+    // fclose(stderr);
 
     // lock files
     for (size_t i = 0; i < numFilesToTest; i++) {
@@ -769,7 +769,7 @@ size_t metaRename(MetaStore *metastore) {
     for (size_t i = 0; i < numFilesToRename; i++) {
         of[i].copyNameAndSize(f[i]);
     }
-    
+   
     updateFileNames(numFilesToRename);
 
     // perform the rename operations

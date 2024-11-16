@@ -786,7 +786,7 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
 
     // obtain file metadata
     std::string fileMetaStr;
-    bool fileMetaExist = getValueInTX(tx, srcFileKey, fileMetaStr);
+    bool fileMetaExist = getValueInTX(tx, std::string(srcFileKey, srcFileKeyLength), fileMetaStr);
     if (fileMetaExist == false)
     {
         LOG(ERROR) << "FDBMetaStore::renameMeta() Error reading metadata for file" << sf.name;
@@ -807,10 +807,32 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
         exit(1);
     }
 
-    // update uuid-to-file-name mapping
-    fmj["uuid"] = boost::uuids::to_string(df.uuid).c_str();
+    // update uuid-to-file-name mapping for the latest file version
+    std::string lastVerFileKey = fmj["verName"].back().get<std::string>();
+    // find metadata for current file version
+    std::string verFileMetaStr;
+    bool verFileMetaExist = getValueInTX(tx, lastVerFileKey, verFileMetaStr);
+    if (verFileMetaExist == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::renameMeta() failed to find latest version in MetaStore, file: " << sf.name;
+        exit(1);
+    }
 
-    // store in dstFileKey
+    nlohmann::json *verFmjPtr = new nlohmann::json();
+    auto &verFmj = *verFmjPtr;
+    if (parseStrToJSONObj(verFileMetaStr, verFmj) == false)
+    {
+        exit(1);
+    }
+
+    verFmj["uuid"] = boost::uuids::to_string(df.uuid);
+
+    // update verFileKey
+    std::string verFmjStr = verFmj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(lastVerFileKey.c_str()), lastVerFileKey.size(), reinterpret_cast<const uint8_t *>(verFmjStr.c_str()), verFmjStr.size());
+    delete verFmjPtr;
+
+    // insert dstFileKey
     std::string fmjStr = fmj.dump();
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileKey), dstFileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
     delete fmjPtr;
@@ -821,7 +843,7 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     // set dstFileUuidKey; remove the original sfidKey (check putMeta impl)
     // insert new metadata
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileUuidKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(dstFileKey), dstFileKeyLength);
-
+    
     DLOG(INFO) << "FDBMetaStore::renameMeta() Add reverse mapping (" << dstFileUuidKey << ") for file " << dstFileKey;
 
     // remove srcFileUuidKey
@@ -846,7 +868,7 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     }
 
     // remove srcFileKey
-    srcFPlj["list"].erase(std::remove(srcFPlj["list"].begin(), srcFPlj["list"].end(), srcFileKey), srcFPlj["list"].end());
+    srcFPlj["list"].erase(std::remove(srcFPlj["list"].begin(), srcFPlj["list"].end(), std::string(srcFileKey, srcFileKeyLength)), srcFPlj["list"].end());
 
     std::string srcFPljStr = srcFPlj.dump();
     delete srcFPljPtr;
@@ -870,7 +892,7 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
             exit(1);
         }
     }
-    dstFPlj["list"].push_back(dstFileKey);
+    dstFPlj["list"].push_back(std::string(dstFileKey, dstFileKeyLength));
 
     std::string dstFPljStr = dstFPlj.dump();
     delete dstFPljPtr;
@@ -882,7 +904,7 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
 
     fdb_future_destroy(cmt);
 
-    LOG(INFO) << "FDBMetaStore:: renameMeta() finished";
+    // DLOG(INFO) << "FDBMetaStore:: renameMeta() finished";
 
     return true;
 }
@@ -894,17 +916,13 @@ bool FDBMetaStore::updateTimestamps(const File &f)
     char fileKey[PATH_MAX];
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
 
-    DLOG(INFO) << fileKeyLength;
-
-    // update the latest version
-
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
     // check whether the file metadata exists
     std::string fileMetaStr;
-    bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
+    bool fileMetaExist = getValueInTX(tx, std::string(fileKey, fileKeyLength), fileMetaStr);
     if (fileMetaExist == false)
     {
         LOG(ERROR) << "FDBMetaStore::updateTimestamps() failed to get metadata for file " << f.name;
@@ -917,8 +935,6 @@ bool FDBMetaStore::updateTimestamps(const File &f)
         return false;
     }
 
-    // current metadata format: key: filename; value: {"verList": [v0, v1, v2,
-    // ...]}; for non-versioned system, verList only stores v0
     nlohmann::json *fmjPtr = new nlohmann::json();
     auto &fmj = *fmjPtr;
     if (parseStrToJSONObj(fileMetaStr, fmj) == false)
@@ -941,28 +957,29 @@ bool FDBMetaStore::updateTimestamps(const File &f)
         return false;
     }
 
-    nlohmann::json *vfmjPtr = new nlohmann::json();
-    auto &vfmj = *vfmjPtr;
-    if (parseStrToJSONObj(verFileMetaStr, vfmj) == false)
+    nlohmann::json *verFmjPtr = new nlohmann::json();
+    auto &verFmj = *verFmjPtr;
+    if (parseStrToJSONObj(verFileMetaStr, verFmj) == false)
     {
         exit(1);
     }
 
-    vfmj["atime"] = std::to_string(f.atime);
-    vfmj["mtime"] = std::to_string(f.mtime);
-    vfmj["ctime"] = std::to_string(f.ctime);
+    verFmj["atime"] = f.atime;
+    verFmj["mtime"] = f.mtime;
+    verFmj["ctime"] = f.ctime;
+    verFmj["tctime"] = f.tctime;
 
     // serialize json to string and store in FDB
-    std::string vfmjStr = vfmj.dump();
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey.c_str()), verFileKey.size(), reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
-    delete vfmjPtr;
+    std::string verFmjStr = verFmj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey.c_str()), verFileKey.size(), reinterpret_cast<const uint8_t *>(verFmjStr.c_str()), verFmjStr.size());
+    delete verFmjPtr;
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    LOG(INFO) << "FDBMetaStore:: updateTimestamps() finished";
+    // DLOG(INFO) << "FDBMetaStore:: updateTimestamps() finished";
 
     return true;
 }
