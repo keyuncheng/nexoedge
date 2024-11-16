@@ -253,6 +253,7 @@ bool FDBMetaStore::putMeta(const File &f)
 
     // add uuid-to-file-name maping
     char fUUIDKey[FDB_MAX_KEY_SIZE + 64];
+    memset(fUUIDKey, 0, FDB_MAX_KEY_SIZE + 64);
     if (genFileUuidKey(f.namespaceId, f.uuid, fUUIDKey) == false)
     {
         LOG(WARNING) << "File uuid " << boost::uuids::to_string(f.uuid) << " is too long to generate a reverse key mapping";
@@ -355,7 +356,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     if (fileMetaExist == false)
     { // file metadata not exist: report and return
-        LOG(WARNING) << "FDBMetaStore::putMeta() failed to get metadata for file " << f.name;
+        LOG(WARNING) << "FDBMetaStore::getMeta() failed to get metadata for file " << f.name;
 
         FDBFuture *cmt = fdb_transaction_commit(tx);
         exitOnError(fdb_future_block_until_ready(cmt));
@@ -569,15 +570,13 @@ bool FDBMetaStore::deleteMeta(File &f)
     char fileKey[PATH_MAX], verFileKey[PATH_MAX];
 
     int fileKeyLength = genFileKey(f.namespaceId, f.name, f.nameLength, fileKey);
-    int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
-
-    int versionToDelete = f.version;
 
     bool isVersioned = !config.overwriteFiles();
     bool lazyDeletion = false;
     bool ret = true;
+    int versionToDelete = f.version;
 
-    DLOG(INFO) << "FDBMetaStore::deleteMeta() start to delete file " << f.name << ", version: " << f.version;
+    // DLOG(INFO) << "FDBMetaStore::deleteMeta() start to delete file " << f.name << ", version: " << f.version << ", fileKey: " << std::string(fileKey, fileKeyLength);
 
     // versioning enabled but a version is not specified, mark as deleted
     if ((isVersioned || lazyDeletion) && versionToDelete == -1)
@@ -603,7 +602,7 @@ bool FDBMetaStore::deleteMeta(File &f)
 
     // check whether the file metadata exists
     std::string fileMetaStr;
-    bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
+    bool fileMetaExist = getValueInTX(tx, std::string(fileKey, fileKeyLength), fileMetaStr);
 
     if (fileMetaExist == false)
     { // file metadata not exist: report and return
@@ -624,15 +623,28 @@ bool FDBMetaStore::deleteMeta(File &f)
         exit(1);
     }
 
+    // non-versioned: directly remove verFileKey
+    if (isVersioned == false) {
+        std::string verFileKeyStr = fmj["verName"].back().get<std::string>();
+        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(verFileKeyStr.c_str()), verFileKeyStr.size());
+        fmj["verId"].clear();
+        fmj["verName"].clear();
+        fmj["verSummary"].clear(); 
+    }
+
     // delete a specific version
-    if (isVersioned && versionToDelete != -1)
+    if (isVersioned == true && versionToDelete != -1)
     {
-        // int curVersion = fmj["verId"].back().get<int>();
         int numVersions = fmj["verId"].size();
 
         if (numVersions == 0)
         {
             LOG(WARNING) << "FDBMetaStore::deleteMeta() No version found for file " << f.name;
+            
+            FDBFuture *cmt = fdb_transaction_commit(tx);
+            exitOnError(fdb_future_block_until_ready(cmt));
+            fdb_future_destroy(cmt);
+
             return false;
         }
 
@@ -642,6 +654,11 @@ bool FDBMetaStore::deleteMeta(File &f)
         {
             // handle error
             LOG(WARNING) << "FDBMetaStore::deleteMeta() version not found for file " << f.name << ", version: " << versionToDelete;
+           
+            FDBFuture *cmt = fdb_transaction_commit(tx);
+            exitOnError(fdb_future_block_until_ready(cmt));
+            fdb_future_destroy(cmt);
+
             return false;
         }
 
@@ -651,6 +668,7 @@ bool FDBMetaStore::deleteMeta(File &f)
         fmj["verName"].erase(fmj["verName"].begin() + idx);
         fmj["verSummary"].erase(fmj["verSummary"].begin() + idx);
 
+        int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
         fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength);
     }
 
@@ -676,7 +694,8 @@ bool FDBMetaStore::deleteMeta(File &f)
     fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength);
 
     char fUuidKey[FDB_MAX_KEY_SIZE + 64];
-
+    memset(fUuidKey, 0, FDB_MAX_KEY_SIZE + 64);
+    
     // TODO remove workaround for renamed file
     f.genUUID();
 
@@ -713,15 +732,21 @@ bool FDBMetaStore::deleteMeta(File &f)
         fplj["list"].erase(it);
     }
 
-    int numFilesInDir = fplj["list"].size();
+    int numFilesInPrefixList = fplj["list"].size();
 
-    std::string fpljStr = fplj.dump();
+    if (numFilesInPrefixList > 0)
+    { // update prefix list
+        std::string fpljStr = fplj.dump();
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(fpljStr.c_str()), fpljStr.size());
+    }
+    else
+    { // the prefix list has no file, remove the prefix list
+        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size());
+    }
     delete fpljPtr;
 
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(fpljStr.c_str()), fpljStr.size());
-
     // remove file prefix from directory set
-    if (numFilesInDir == 0)
+    if (numFilesInPrefixList == 0)
     {
         std::string dirListStr;
         bool dirListExist = getValueInTX(tx, std::string(FDB_DIR_LIST_KEY), dirListStr);
@@ -768,6 +793,8 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
 
     // file uuids
     char srcFileUuidKey[FDB_MAX_KEY_SIZE + 64], dstFileUuidKey[FDB_MAX_KEY_SIZE + 64];
+    memset(srcFileUuidKey, 0, FDB_MAX_KEY_SIZE + 64);
+    memset(dstFileUuidKey, 0, FDB_MAX_KEY_SIZE + 64);
     sf.genUUID();
     df.genUUID();
     if (!genFileUuidKey(sf.namespaceId, sf.uuid, srcFileUuidKey))
@@ -840,14 +867,12 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     // remove srcFileKey
     fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(srcFileKey), srcFileKeyLength);
 
-    // set dstFileUuidKey; remove the original sfidKey (check putMeta impl)
-    // insert new metadata
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileUuidKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(dstFileKey), dstFileKeyLength);
-    
-    DLOG(INFO) << "FDBMetaStore::renameMeta() Add reverse mapping (" << dstFileUuidKey << ") for file " << dstFileKey;
-
-    // remove srcFileUuidKey
+    // set dstFileUuidKey; remove the original sfidKey
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFileUuidKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(df.name), df.nameLength);
     fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(srcFileUuidKey), FDB_MAX_KEY_SIZE + 64);
+    
+    // DLOG(INFO) << "FDBMetaStore::renameMeta() Add reverse mapping (" << std::string(dstFileUuidKey, FDB_MAX_KEY_SIZE) << ") for file " << std::string(dstFileKey, dstFileKeyLength);
+    // DLOG(INFO) << "FDBMetaStore::renameMeta() remove reverse mapping (" << std::string(srcFileUuidKey, FDB_MAX_KEY_SIZE) << ") for file " << std::string(srcFileKey, srcFileKeyLength);
 
     // update the src file prefix set
     std::string srcFilePrefix = getFilePrefix(srcFileKey);
@@ -870,9 +895,18 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     // remove srcFileKey
     srcFPlj["list"].erase(std::remove(srcFPlj["list"].begin(), srcFPlj["list"].end(), std::string(srcFileKey, srcFileKeyLength)), srcFPlj["list"].end());
 
-    std::string srcFPljStr = srcFPlj.dump();
+    int numFilesInSrcPrefixList = srcFPlj["list"].size();
+
+    if (numFilesInSrcPrefixList > 0)
+    { // update prefix list
+        std::string srcFPljStr = srcFPlj.dump();
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(srcFilePrefix.c_str()), srcFilePrefix.size(), reinterpret_cast<const uint8_t *>(srcFPljStr.c_str()), srcFPljStr.size());
+    }
+    else
+    { // the prefix list has no file, remove the prefix list
+        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(srcFilePrefix.c_str()), srcFilePrefix.size());
+    }
     delete srcFPljPtr;
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(srcFilePrefix.c_str()), srcFilePrefix.size(), reinterpret_cast<const uint8_t *>(srcFPljStr.c_str()), srcFPljStr.size());
 
     // update the dst file prefix set
     std::string dstFilePrefix = getFilePrefix(dstFileKey);
@@ -897,6 +931,44 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     std::string dstFPljStr = dstFPlj.dump();
     delete dstFPljPtr;
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFilePrefix.c_str()), dstFilePrefix.size(), reinterpret_cast<const uint8_t *>(dstFPljStr.c_str()), dstFPljStr.size());
+
+    // update DIR_LIST
+    std::string dirListStr;
+    bool dirListExist = getValueInTX(tx, std::string(FDB_DIR_LIST_KEY), dirListStr);
+    if (dirListExist == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::deleteMeta() Error finding directory list";
+        exit(1);
+    }
+
+    nlohmann::json *dljPtr = new nlohmann::json();
+    auto &dlj = *dljPtr;
+    if (parseStrToJSONObj(dirListStr, dlj) == false)
+    {
+        exit(1);
+    }
+    
+    // remove src file prefix from directory set
+    if (numFilesInSrcPrefixList == 0)
+    {
+        // remove filePrefix from the list
+        auto it = std::find(dlj["list"].begin(), dlj["list"].end(), srcFilePrefix);
+        if (it != dlj["list"].end())
+        {
+            dlj["list"].erase(it);
+        }
+    }
+    // add dst file prefix from directory set
+    auto it = std::find(dlj["list"].begin(), dlj["list"].end(), dstFilePrefix);
+    if (it == dlj["list"].end())
+    {
+        dlj["list"].push_back(dstFilePrefix);
+    }
+    
+    std::string dljStr = dlj.dump();
+    delete dljPtr;
+
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(dljStr.c_str()), dljStr.size());
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -1077,6 +1149,7 @@ bool FDBMetaStore::getFileName(boost::uuids::uuid fuuid, File &f)
     std::lock_guard<std::mutex> lk(_lock);
 
     char fileUuidKey[FDB_MAX_KEY_SIZE + 64];
+    memset(fileUuidKey, 0, FDB_MAX_KEY_SIZE + 64);
     if (!genFileUuidKey(f.namespaceId, fuuid, fileUuidKey))
         return false;
     return getFileName(fileUuidKey, f);
@@ -1305,11 +1378,11 @@ bool FDBMetaStore::getFileName(char fileUuidKey[], File &f)
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
     // check whether the file metadata exists
-    std::string fileKeyStr;
-    bool fileKeyExist = getValueInTX(tx, fileUuidKey, fileKeyStr);
-    if (fileKeyExist == false)
+    std::string fileNameStr;
+    bool fileNameExist = getValueInTX(tx, std::string(fileUuidKey, FDB_MAX_KEY_SIZE + 64), fileNameStr);
+    if (fileNameExist == false)
     {
-        LOG(WARNING) << "FDBMetaStore::getFileName() failed to get filename from File UUID Key " << fileUuidKey;
+        LOG(WARNING) << "FDBMetaStore::getFileName() failed to get filename from File UUID Key " << std::string(fileUuidKey, FDB_MAX_KEY_SIZE + 64);
 
         // commit transaction and return
         FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -1319,21 +1392,11 @@ bool FDBMetaStore::getFileName(char fileUuidKey[], File &f)
         return false;
     }
 
-    // current metadata format: key: filename; value: {"verList": [v0, v1, v2,
-    // ...]}; for non-versioned system, verList only stores v0
-    nlohmann::json *fileKeyPtr = new nlohmann::json();
-    auto &fileKeyj = *fileKeyPtr;
-    if (parseStrToJSONObj(fileKeyStr, fileKeyj) == false)
-    {
-        exit(1);
-    }
-
     // copy to file name
-    f.nameLength = fileKeyStr.size();
+    f.nameLength = fileNameStr.size();
     f.name = (char *)malloc(f.nameLength + 1);
-    strncpy(f.name, fileKeyStr.c_str(), f.nameLength);
+    strncpy(f.name, fileNameStr.c_str(), f.nameLength);
     f.name[f.nameLength] = 0;
-    delete fileKeyPtr;
 
     // commit transaction and return
     FDBFuture *cmt = fdb_transaction_commit(tx);
