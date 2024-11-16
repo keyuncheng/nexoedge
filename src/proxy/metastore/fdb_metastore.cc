@@ -10,6 +10,7 @@
 #include "fdb_metastore.hh"
 #include "../../common/config.hh"
 #include "../../common/define.hh"
+#include "../../common/checksum_calculator.hh"
 
 // change defs's prefix to FDB_
 #define FDB_NUM_RESERVED_SYSTEM_KEYS (9)
@@ -82,7 +83,8 @@ bool FDBMetaStore::putMeta(const File &f)
     fVerSummary.append(std::to_string(f.size).append(" "));
     fVerSummary.append(std::to_string(f.mtime).append(" "));
     // convert md5 to string
-    fVerSummary.append(std::string(reinterpret_cast<const char *>(f.md5), MD5_DIGEST_LENGTH).append(" "));
+    std::string fileMd5 = ChecksumCalculator::toHex(f.md5, MD5_DIGEST_LENGTH);
+    // fVerSummary.append(fileMd5.append(" "));
     fVerSummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" "));
     fVerSummary.append(std::to_string(f.numChunks));
 
@@ -92,7 +94,7 @@ bool FDBMetaStore::putMeta(const File &f)
 
     // check whether the file metadata exists
     std::string fileMetaStr;
-    bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
+    bool fileMetaExist = getValueInTX(tx, std::string(fileKey, fileKeyLength), fileMetaStr);
 
     nlohmann::json *fmjPtr = new nlohmann::json();
     auto &fmj = *fmjPtr;
@@ -104,7 +106,7 @@ bool FDBMetaStore::putMeta(const File &f)
         fmj["verId"].push_back(std::to_string(f.version));
         // version name
         fmj["verName"] = nlohmann::json::array();
-        fmj["verName"].push_back(verFileKey);
+        fmj["verName"].push_back(std::string(verFileKey, verFileKeyLength));
         // version summary
         fmj["verSummary"] = nlohmann::json::array();
         fmj["verSummary"].push_back(fVerSummary);
@@ -131,7 +133,7 @@ bool FDBMetaStore::putMeta(const File &f)
             fmj["verId"].clear();
             fmj["verId"].push_back(f.version);
             fmj["verName"].clear();
-            fmj["verName"].push_back(verFileKey);
+            fmj["verName"].push_back(std::string(verFileKey, verFileKeyLength));
             fmj["verSummary"].clear();
             fmj["verSummary"].push_back(fVerSummary);
         }
@@ -149,7 +151,7 @@ bool FDBMetaStore::putMeta(const File &f)
                     }
                 }
                 fmj["verId"].insert(fmj["verId"].begin() + pos, f.version);
-                fmj["verName"].insert(fmj["verName"].begin() + pos, verFileKey);
+                fmj["verName"].insert(fmj["verName"].begin() + pos, std::string(verFileKey, verFileKeyLength));
                 fmj["verSummary"].insert(fmj["verSummary"].begin() + pos, fVerSummary);
             }
         }
@@ -187,19 +189,14 @@ bool FDBMetaStore::putMeta(const File &f)
     verFmj["f"] = f.codingMeta.f;
     verFmj["maxCS"] = f.codingMeta.maxChunkSize;
     verFmj["codingStateS"] = f.codingMeta.codingStateSize;
-    verFmj["codingState"] = std::string(reinterpret_cast<char *>(codingState));
+    verFmj["codingState"] = ChecksumCalculator::toHex(codingState, f.codingMeta.codingStateSize);
     verFmj["numS"] = f.numStripes;
     verFmj["ver"] = f.version;
     verFmj["ctime"] = f.ctime;
     verFmj["atime"] = f.atime;
     verFmj["mtime"] = f.mtime;
     verFmj["tctime"] = f.tctime;
-    verFmj["md5"] = std::string(reinterpret_cast<const char *>(f.md5), MD5_DIGEST_LENGTH);
-    std::string str = verFmj["md5"].get<std::string>();
-    LOG(INFO) << "md5: " << str;
-    for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
-        LOG(INFO) << int(str[i]) << " " << int(f.md5[i]);
-    }
+    verFmj["md5"] = fileMd5;
     verFmj["sg_size"] = f.staged.size;
     verFmj["sg_sc"] = f.staged.storageClass;
     verFmj["sg_cs"] = f.staged.codingMeta.coding;
@@ -216,14 +213,15 @@ bool FDBMetaStore::putMeta(const File &f)
     char chunkName[FDB_MAX_KEY_SIZE];
     for (int i = 0; i < f.numChunks; i++)
     {
-        genChunkKeyPrefix(f.chunks[i].getChunkId(), chunkName);
-        std::string cidKey = std::string(chunkName) + std::string("-cid");
+        int chunkNameLength = genChunkKeyPrefix(f.chunks[i].getChunkId(), chunkName);
+        std::string chunkNameStr(chunkName, chunkNameLength);
+        std::string cidKey = chunkNameStr + std::string("-cid");
         verFmj[cidKey.c_str()] = f.containerIds[i];
-        std::string csizeKey = std::string(chunkName) + std::string("-size");
+        std::string csizeKey = chunkNameStr + std::string("-size");
         verFmj[csizeKey.c_str()] = f.chunks[i].size;
-        std::string cmd5Key = std::string(chunkName) + std::string("-md5");
-        verFmj[cmd5Key.c_str()] = std::string(reinterpret_cast<const char *>(f.chunks[i].md5), MD5_DIGEST_LENGTH);
-        std::string cmd5Bad = std::string(chunkName) + std::string("-bad");
+        std::string cmd5Key = chunkNameStr + std::string("-md5");
+        verFmj[cmd5Key.c_str()] = ChecksumCalculator::toHex(f.chunks[i].md5, MD5_DIGEST_LENGTH);
+        std::string cmd5Bad = chunkNameStr + std::string("-bad");
         verFmj[cmd5Bad.c_str()] = (f.chunksCorrupted ? f.chunksCorrupted[i] : 0);
     }
 
@@ -232,18 +230,20 @@ bool FDBMetaStore::putMeta(const File &f)
     size_t blockId = 0;
     for (auto it = f.uniqueBlocks.begin(); it != f.uniqueBlocks.end(); it++, blockId++)
     { // deduplication fingerprints
-        genBlockKey(blockId, blockName, /* is unique */ true);
+        int blockNameLength = genBlockKey(blockId, blockName, /* is unique */ true);
+        std::string blockNameStr(blockName, blockNameLength);
         std::string fp = it->second.first.get();
         // logical offset, length, fingerprint, physical offset
-        verFmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data() + std::to_string(it->second.second);
+        verFmj[blockNameStr.c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data() + std::to_string(it->second.second);
     }
     blockId = 0;
     for (auto it = f.duplicateBlocks.begin(); it != f.duplicateBlocks.end(); it++, blockId++)
     {
-        genBlockKey(blockId, blockName, /* is unique */ false);
+        int blockNameLength = genBlockKey(blockId, blockName, /* is unique */ false);
+        std::string blockNameStr(blockName, blockNameLength);
         std::string fp = it->second.get();
         // logical offset, length, fingerprint
-        verFmj[std::string(blockName).c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
+        verFmj[blockNameStr.c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
     }
 
     std::string verFmjStr = verFmj.dump();
@@ -329,7 +329,7 @@ bool FDBMetaStore::putMeta(const File &f)
 
     fdb_future_destroy(cmt);
 
-    LOG(INFO) << "FDBMetaStore:: putMeta() finished";
+    // DLOG(INFO) << "FDBMetaStore:: putMeta() finished";
 
     return true;
 }
@@ -344,8 +344,6 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     // versioned file key
     int verFileKeyLength = genVersionedFileKey(f.namespaceId, f.name, f.nameLength, f.version, verFileKey);
-    
-    DLOG(INFO) << "DLOG: " << fileKeyLength << " " << verFileKeyLength;
 
     // create transaction
     FDBTransaction *tx;
@@ -353,7 +351,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     // check whether the file metadata exists
     std::string fileMetaStr;
-    bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
+    bool fileMetaExist = getValueInTX(tx, std::string(fileKey, fileKeyLength), fileMetaStr);
 
     if (fileMetaExist == false)
     { // file metadata not exist: report and return
@@ -380,6 +378,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     { // version not specified: retrieved the latest version
         std::string lastVerFileKey = fmj["verName"].back().get<std::string>();
         memcpy(verFileKey, lastVerFileKey.c_str(), lastVerFileKey.size());
+        verFileKeyLength = lastVerFileKey.size();
     }
     else
     { // versioned file
@@ -403,7 +402,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     // find metadata for current file version
     std::string verFileMetaStr;
-    bool verFileMetaExist = getValueInTX(tx, verFileKey, verFileMetaStr);
+    bool verFileMetaExist = getValueInTX(tx, std::string(verFileKey, verFileKeyLength), verFileMetaStr);
     if (verFileMetaExist == false)
     {
         LOG(ERROR) << "FDBMetaStore::getMeta() failed to find version in MetaStore, file: " << f.name << ", version: " << f.version;
@@ -444,19 +443,14 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     f.codingMeta.codingStateSize = verFmj["codingStateS"].get<int>();
     if (f.codingMeta.codingStateSize > 0) {
         f.codingMeta.codingState = new unsigned char[f.codingMeta.codingStateSize];
-        memcpy(f.codingMeta.codingState, verFmj["codingState"].get<std::string>().c_str(), f.codingMeta.codingStateSize);
+        ChecksumCalculator::unHex(verFmj["codingState"].get<std::string>(), f.codingMeta.codingState, f.codingMeta.codingStateSize);
     }
     f.version = verFmj["ver"].get<int>();
     f.ctime = verFmj["ctime"].get<time_t>();
     f.atime = verFmj["atime"].get<time_t>();
     f.mtime = verFmj["mtime"].get<time_t>();
     f.tctime = verFmj["tctime"].get<time_t>();
-    LOG(INFO) << "md5: " << verFmj["md5"].get<std::string>().c_str();
-    memcpy(f.md5, reinterpret_cast<const unsigned char *>(verFmj["md5"].get<std::string>().c_str()), MD5_DIGEST_LENGTH);
-    std::string str = verFmj["md5"].get<std::string>();
-    for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
-        LOG(INFO) << int(str[i]) << " " << int(f.md5[i]);
-    }
+    ChecksumCalculator::unHex(verFmj["md5"].get<std::string>(), f.md5, MD5_DIGEST_LENGTH);
     f.staged.size = verFmj["sg_size"].get<int>();
     f.staged.storageClass = verFmj["sg_sc"].get<std::string>();
     f.staged.codingMeta.maxChunkSize = verFmj["sg_cs"].get<int>();
@@ -479,16 +473,17 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     char chunkName[FDB_MAX_KEY_SIZE];
     for (int chunkId = 0; chunkId < f.numChunks; chunkId++)
     {
-        genChunkKeyPrefix(chunkId, chunkName);
-        std::string cidKey = std::string(chunkName) + std::string("-cid");
-        std::string csizeKey = std::string(chunkName) + std::string("-size");
-        std::string cmd5Key = std::string(chunkName) + std::string("-md5");
-        std::string cbadKey = std::string(chunkName) + std::string("-bad");
+        int chunkNameLength = genChunkKeyPrefix(chunkId, chunkName);
+        std::string chunkNameStr(chunkName, chunkNameLength);
+        std::string cidKey = chunkNameStr + std::string("-cid");
+        std::string csizeKey = chunkNameStr + std::string("-size");
+        std::string cmd5Key = chunkNameStr + std::string("-md5");
+        std::string cbadKey = chunkNameStr + std::string("-bad");
 
         f.containerIds[chunkId] = verFmj[cidKey.c_str()].get<int>();
         f.chunks[chunkId].size = verFmj[csizeKey.c_str()].get<int>();
-        std::string md5str = std::string(verFmj[cmd5Key.c_str()].get<std::string>().c_str(), MD5_DIGEST_LENGTH);
-        memcpy(f.chunks[chunkId].md5, reinterpret_cast<const unsigned char *>(md5str.c_str()), MD5_DIGEST_LENGTH);
+        std::string chunkMd5 = verFmj["codingState"].get<std::string>();
+        ChecksumCalculator::unHex(chunkMd5, f.chunks[chunkId].md5, MD5_DIGEST_LENGTH);
         f.chunksCorrupted[chunkId] = verFmj[cbadKey.c_str()].get<int>(); // TODO: double check this field; make sure it's correct
         f.chunks[chunkId].setId(f.namespaceId, f.uuid, chunkId);
         f.chunks[chunkId].data = 0;
@@ -509,11 +504,12 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         size_t lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH + sizeof(int);
         for (size_t blockId = 0; blockId < numUniqueBlocks; blockId++)
         {
-            genBlockKey(blockId, blockName, /* is unique */ true);
-            std::string blockStr = verFmj[std::string(blockName).c_str()].get<std::string>();
+            int blockNameLength = genBlockKey(blockId, blockName, /* is unique */ true);
+            std::string blockNameStr(blockName, blockNameLength);
+            std::string blockStr = verFmj[blockNameStr.c_str()].get<std::string>();
             loc._offset = std::stoull(blockStr.substr(pOffset, sizeof(unsigned long int)));
             loc._length = std::stoull(blockStr.substr(pOffset + sizeof(unsigned long int), sizeof(unsigned int)));
-            if (verFmj[std::string(blockName).c_str()].size() >= lengthWithFp)
+            if (verFmj[blockNameStr.c_str()].size() >= lengthWithFp)
             {
                 std::string fpStr = blockStr.substr(pOffset + hasFpOfs, SHA256_DIGEST_LENGTH);
                 fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
@@ -536,14 +532,14 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
         for (size_t blockId = 0; blockId < numDuplicateBlocks; blockId++)
         {
-            genBlockKey(blockId, blockName, /* is unique */ false);
+            int blockNameLength = genBlockKey(blockId, blockName, /* is unique */ false);
+            std::string blockNameStr(blockName, blockNameLength);
+            loc._offset = std::stoull(verFmj[blockNameStr.c_str()].get<std::string>().substr(0, sizeof(unsigned long int)));
+            loc._length = std::stoull(verFmj[blockNameStr.c_str()].get<std::string>().substr(sizeof(unsigned long int), sizeof(unsigned int)));
 
-            loc._offset = std::stoull(verFmj[std::string(blockName).c_str()].get<std::string>().substr(0, sizeof(unsigned long int)));
-            loc._length = std::stoull(verFmj[std::string(blockName).c_str()].get<std::string>().substr(sizeof(unsigned long int), sizeof(unsigned int)));
-
-            if (verFmj[std::string(blockName).c_str()].size() >= lengthWithFp)
+            if (verFmj[blockNameStr.c_str()].size() >= lengthWithFp)
             {
-                std::string fpStr = verFmj[std::string(blockName).c_str()].get<std::string>().substr(noFpOfs, SHA256_DIGEST_LENGTH);
+                std::string fpStr = verFmj[blockNameStr.c_str()].get<std::string>().substr(noFpOfs, SHA256_DIGEST_LENGTH);
                 fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
             }
 
@@ -559,7 +555,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    LOG(INFO) << "FDBMetaStore::getMeta() finished";
+    // DLOG(INFO) << "FDBMetaStore::getMeta() finished";
 
     return true;
 }
@@ -1547,12 +1543,12 @@ bool FDBMetaStore::getValueInTX(FDBTransaction *tx, const std::string &key, std:
         // parse result as string
         value = std::string(reinterpret_cast<const char *>(valueRaw), valueRawLength);
         // LOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found: value " << value;
-        LOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found, value has size: " << value.size();
+        // DLOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found, value has size: " << value.size();
         return true;
     }
     else
     {
-        LOG(INFO) << "FDBMetaStore:: getValueInTX() key " << key << " not found";
+        // DLOG(INFO) << "FDBMetaStore:: getValueInTX() key " << key << " not found";
         return false;
     }
 }

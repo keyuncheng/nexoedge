@@ -13,7 +13,7 @@
 #include "../../proxy/metastore/fdb_metastore.hh"
 
 // static const size_t numFilesToTest = 1024;
-static const size_t numFilesToTest = 2;
+static const size_t numFilesToTest = 200;
 static const int maxFileNameLength = 1024;
 static const unsigned long maxFileSize = (unsigned long) (1 << 30) * 4; // 4GB
 static int chunkSize = (1 << 20); // 1MB
