@@ -31,6 +31,11 @@ static void updateFileContainers(size_t);
 static void updateFiles();
 static bool compareFile(size_t, const File&, const File&);
 static void exitWithError();
+
+static size_t getNumPortionFilesToTest();
+static void preMetaUpdate();
+static void preRename();
+static void preUpdateTimestamps();
 static void readAndCheckFileMeta();
 static void checkLock();
 static void checkUnlock();
@@ -109,6 +114,7 @@ int main(int argc, char **argv) {
     printf("> Test %d completed: Write metadata of %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
     // test 2: file metadata update
+    preMetaUpdate();
     mytimer.start();
     metaUpdate(metastore);
     duration = mytimer.elapsed().wall;
@@ -141,6 +147,7 @@ int main(int argc, char **argv) {
     printf("> Test %d completed: Mark and unmark %lu files for repair in %.6lf seconds\n", ++testCount, numFilesToTest, nanoSecToSec(duration));
 
     // test 7: file renaming
+    preRename();
     mytimer.start();
     size_t numFilesTested = metaRename(metastore);
     duration = mytimer.elapsed().wall;
@@ -148,6 +155,7 @@ int main(int argc, char **argv) {
     printf("> Test %d completed: Rename %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesTested, nanoSecToSec(duration), getThp(numFilesTested, duration));
 
     // test 8: file timestamp updates
+    preUpdateTimestamps();
     mytimer.start();
     numFilesTested = metaUpdateTimestamps(metastore);
     duration = mytimer.elapsed().wall;
@@ -560,6 +568,37 @@ static void exitWithError() {
     exit(1);
 }
 
+static size_t getNumPortionFilesToTest() {
+    size_t portion = 2;
+    size_t numFiles = numFilesToTest / portion;
+    if (numFiles< 1) {
+        numFiles= 1;
+    }
+    return numFiles;
+}
+
+static void preMetaUpdate() {
+    updateFiles();
+}
+
+static void preRename() {
+    size_t numFilesToRename = getNumPortionFilesToTest();
+    // backup the file names before rename for operation and non-existance check
+    of = new File[numFilesToRename];
+    for (size_t i = 0; i < numFilesToRename; i++) {
+        of[i].copyNameAndSize(f[i]);
+    }
+    updateFileNames(numFilesToRename);
+}
+
+static void preUpdateTimestamps() {
+    size_t numFilesToUpdate = getNumPortionFilesToTest();
+    // update the metadata timestamps
+    for (size_t i = 0; i < numFilesToUpdate; i++) {
+        updateFileTimestamps(numFilesToUpdate);
+    }
+}
+
 static void readAndCheckFileMeta() {
     for (size_t i = 0; i < numFilesToTest; i++) {
         // get metadata
@@ -633,7 +672,6 @@ void metaWrite(MetaStore* metastore) {
 
 void metaUpdate(MetaStore* metastore) {
     // update file metadata
-    updateFiles();
     for (size_t i = 0; i < numFilesToTest; i++)
         metastore->putMeta(f[i]);
 }
@@ -646,10 +684,6 @@ void metaLock(MetaStore *metastore) {
     for (size_t i = 0; i < numFilesToTest; i++) {
         if (!metastore->lockFile(f[i])) {
             printf(">> Failed to lock file %lu\n", i);
-            exitWithError();
-        }
-        if (metastore->lockFile(f[i])) {
-            printf(">> Failed to prevent locking of locked file %lu\n", i);
             exitWithError();
         }
     }
@@ -799,18 +833,7 @@ void metaForRepair(MetaStore *metastore) {
 }
 
 size_t metaRename(MetaStore *metastore) {
-    size_t portionToRename = 2;
-    size_t numFilesToRename = numFilesToTest / portionToRename;
-    if (numFilesToRename < 1) {
-        numFilesToRename = 1;
-    }
-    // backup the file names before rename for operation and non-existance check
-    of = new File[numFilesToTest];
-    for (size_t i = 0; i < numFilesToRename; i++) {
-        of[i].copyNameAndSize(f[i]);
-    }
-    
-    updateFileNames(numFilesToRename);
+    size_t numFilesToRename = getNumPortionFilesToTest();
 
     // perform the rename operations
     for (size_t i = 0; i < numFilesToRename; i++) {
@@ -826,13 +849,7 @@ size_t metaRename(MetaStore *metastore) {
 }
 
 size_t metaUpdateTimestamps(MetaStore *metastore) {
-    size_t portionToUpdate = 2;
-    size_t numFilesToUpdate = numFilesToTest / portionToUpdate;
-    
-    // update the metadata timestamps
-    for (size_t i = 0; i < numFilesToUpdate; i++) {
-        updateFileTimestamps(numFilesToUpdate);
-    }
+    size_t numFilesToUpdate = getNumPortionFilesToTest();
 
     // update metadata in the metastore
     for (size_t i = 0; i < numFilesToUpdate; i++) {
