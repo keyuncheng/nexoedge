@@ -1166,15 +1166,14 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
     if (namespaceId == INVALID_NAMESPACE_ID)
         namespaceId = Config::getInstance().getProxyNamespaceId();
 
-    // count number of files
-    int numFiles = 0;
-
     // candidate fileKeys for listing
-    vector<std::string> candidateFileKeys;
+    std::vector<std::string> candidateFileKeys;
 
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    DLOG(INFO) << "FDBMetaStore::getFileList() " << "prefix = " << prefix;
 
     if (prefix == "" || prefix.back() != '/')
     { // get keys started with prefix
@@ -1191,19 +1190,94 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
         fdb_future_destroy(keyRangeFut);
         keyRangeFut = nullptr;
 
-        if (keyCount == 0)
-        {
-            *list = new FileInfo[keyCount];
-        }
         // TODO: put the elements in keyArray into the list
+        for (int idx = 0; idx < keyCount; idx++)
+        {
+            std::string keyStr(reinterpret_cast<const char *>(keyArray[idx].key), keyArray[idx].key_length);
+            candidateFileKeys.push_back(keyStr);
+        }
     }
     else
     {
         std::string sprefix;
         sprefix.append(std::to_string(namespaceId)).append("_").append(prefix);
         sprefix = getFilePrefix(sprefix.c_str());
-        DLOG(INFO) << "FDBMetaStore::getFileList() " << "prefix = " << prefix << " sprefix = " << sprefix;
+        DLOG(INFO) << "FDBMetaStore::getFileList() sprefix = " << sprefix;
+
+        std::string filePrefixListStr;
+        bool filePrefixSetExist = getValueInTX(tx, sprefix, filePrefixListStr);
+        if (filePrefixSetExist == false)
+        {
+            LOG(ERROR) << "FDBMetaStore::getFileList() Error finding file prefix set";
+            exit(1);
+        }
+
+        nlohmann::json *fpljPtr = new nlohmann::json();
+        auto &fplj = *fpljPtr;
+        if (parseStrToJSONObj(filePrefixListStr, fplj) == false)
+        {
+            exit(1);
+        }
+
+        // get all candidate fileKeys
+        if (fplj["list"].size() > 0)
+        {
+            // get all fileKeys started with prefix
+            for (auto &fileKey : fplj["list"])
+            {
+                candidateFileKeys.push_back(fileKey.get<std::string>());
+            }
+        }
+        delete fpljPtr;
     }
+
+    // init file list
+    if (candidateFileKeys.size() > 0)
+    {
+        *list = new FileInfo[candidateFileKeys.size()];
+    }
+
+    // count number of files
+    int numFiles = 0;
+
+    for (auto &fileKey : candidateFileKeys)
+    {
+        if (isSystemKey(fileKey.c_str()))
+        {
+            continue;
+        }
+        // full name in form of "namespaceId_filename"
+        if (!getNameFromFileKey(
+                fileKey.c_str(), fileKey.size(),
+                &list[0][numFiles].name,
+                list[0][numFiles].nameLength,
+                list[0][numFiles].namespaceId))
+        {
+            continue;
+        }
+
+        FileInfo &cur = list[0][numFiles];
+
+        if (withSize || withTime || withVersions)
+        {
+            // get file size and time if requested
+        }
+        // do not add delete marker to the list unless for queries on versions
+        if (!withVersions && cur.isDeleted)
+        {
+            continue;
+        }
+        if (withVersions && cur.version > 0)
+        {
+            // get version information
+        }
+        numFiles++;
+    }
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
 
     return 0;
 }
