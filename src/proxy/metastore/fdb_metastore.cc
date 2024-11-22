@@ -53,7 +53,6 @@ FDBMetaStore::FDBMetaStore()
     // init database
     _db = getDatabase(_FDBClusterFile);
 
-    // TODO: check the params here
     _taskScanIt = "0";
     _endOfPendingWriteSet = true;
 
@@ -102,7 +101,7 @@ bool FDBMetaStore::putMeta(const File &f)
 
     if (fileMetaExist == false)
     { // No file meta: init the new version
-        // version id: (TODO: check correctness when f.version == -1)
+        // version id
         fmj["verId"] = nlohmann::json::array();
         fmj["verId"].push_back(std::to_string(f.version));
         // version name
@@ -159,7 +158,6 @@ bool FDBMetaStore::putMeta(const File &f)
     }
 
     // Store file meta into FDB
-    // TODO: fix dump with UTF-8 issue (unsigned char to char conversion)
     std::string fmjStr = fmj.dump();
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
     delete fmjPtr;
@@ -487,7 +485,7 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         f.chunks[chunkId].size = verFmj[csizeKey.c_str()].get<int>();
         std::string chunkMd5 = verFmj["codingState"].get<std::string>();
         ChecksumCalculator::unHex(chunkMd5, f.chunks[chunkId].md5, MD5_DIGEST_LENGTH);
-        f.chunksCorrupted[chunkId] = verFmj[cbadKey.c_str()].get<int>(); // TODO: double check this field; make sure it's correct
+        f.chunksCorrupted[chunkId] = verFmj[cbadKey.c_str()].get<int>();
         f.chunks[chunkId].setId(f.namespaceId, f.uuid, chunkId);
         f.chunks[chunkId].data = 0;
         f.chunks[chunkId].freeData = true;
@@ -698,8 +696,6 @@ bool FDBMetaStore::deleteMeta(File &f)
 
     char fUuidKey[FDB_MAX_KEY_SIZE + 64];
     memset(fUuidKey, 0, FDB_MAX_KEY_SIZE + 64);
-
-    // TODO remove workaround for renamed file
     f.genUUID();
 
     // remove file uuid key
@@ -1191,7 +1187,6 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
         fdb_future_destroy(keyRangeFut);
         keyRangeFut = nullptr;
 
-        // TODO: put the elements in keyArray into the list
         for (int idx = 0; idx < keyCount; idx++)
         {
             std::string keyStr(reinterpret_cast<const char *>(keyArray[idx].key), keyArray[idx].key_length);
@@ -1365,11 +1360,12 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
 
     DLOG(INFO) << "FDBMetaStore::getFileList() finished";
 
-    return 0;
+    return numFiles;
 }
 
 unsigned int FDBMetaStore::getFolderList(std::vector<std::string> &list, unsigned char namespaceId, std::string prefix, bool skipSubfolders)
 {
+    // TBD
     return 0;
 }
 
@@ -1381,18 +1377,19 @@ unsigned long int FDBMetaStore::getMaxNumKeysSupported()
 
 unsigned long int FDBMetaStore::getNumFiles()
 {
-    // TODO: decide how to count the number of files
-
+    // TBD
     return 0;
 }
 
 unsigned long int FDBMetaStore::getNumFilesToRepair()
 {
+    // TBD
     return 0;
 }
 
 int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
 {
+    // TBD
     return 0;
 }
 
@@ -1424,21 +1421,25 @@ bool FDBMetaStore::markFileAsWrittenToCloud(const File &file, bool removePending
 
 bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool set, const char *opName)
 {
+    // TBD
     return false;
 }
 
 int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
 {
+    // TBD
     return false;
 }
 
 bool FDBMetaStore::updateFileStatus(const File &file)
 {
+    // TBD
     return false;
 }
 
 bool FDBMetaStore::getNextFileForTaskCheck(File &file)
 {
+    // TBD
     return true;
 }
 
@@ -1486,20 +1487,24 @@ bool FDBMetaStore::addChunkToJournal(const File &file, const Chunk &chunk, int c
 
 bool FDBMetaStore::updateChunkInJournal(const File &file, const Chunk &chunk, bool isWrite, bool deleteRecord, int containerId)
 {
+    // TBD
     return false;
 }
 
 void FDBMetaStore::getFileJournal(const FileInfo &file, std::vector<std::tuple<Chunk, int /* container id*/, bool /* isWrite */, bool /* isPre */>> &records)
 {
+    // TBD
 }
 
 int FDBMetaStore::getFilesWithJounal(FileInfo **list)
 {
+    // TBD
     return 0;
 }
 
 bool FDBMetaStore::fileHasJournal(const File &file)
 {
+    // TBD
     return false;
 }
 
