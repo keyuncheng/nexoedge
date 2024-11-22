@@ -6,6 +6,7 @@
 #include <glog/logging.h>
 #include <openssl/md5.h>
 #include <openssl/sha.h>
+#include <sstream>
 
 #include "fdb_metastore.hh"
 #include "../../common/config.hh"
@@ -1256,11 +1257,63 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
             continue;
         }
 
+        // store in FileInfo
         FileInfo &cur = list[0][numFiles];
+
+        std::string fileMetaStr;
+        bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
+        if (fileMetaExist == false)
+        {
+            LOG(ERROR) << "FDBMetaStore::getFileList() failed to get metadata for file " << cur.name;
+            continue;
+        }
+        nlohmann::json *fmjPtr = new nlohmann::json();
+        auto &fmj = *fmjPtr;
+        if (parseStrToJSONObj(fileMetaStr, fmj) == false)
+        {
+            exit(1);
+        }
 
         if (withSize || withTime || withVersions)
         {
+
             // get file size and time if requested
+
+            // get latest version
+            std::string verFileKey = fmj["verName"].back().get<std::string>();
+            std::string verFileMetaStr;
+            bool verFileMetaExist = getValueInTX(tx, verFileKey, verFileMetaStr);
+            if (verFileMetaExist == false)
+            {
+                LOG(ERROR) << "FDBMetaStore::getFileList() failed to get metadata for file " << cur.name;
+                continue;
+            }
+            nlohmann::json *vfmjPtr = new nlohmann::json();
+            auto &vfmj = *vfmjPtr;
+            if (parseStrToJSONObj(verFileMetaStr, vfmj) == false)
+            {
+                exit(1);
+            }
+
+            cur.size = vfmj["size"].get<unsigned long int>();
+            cur.ctime = vfmj["ctime"].get<time_t>();
+            cur.atime = vfmj["atime"].get<time_t>();
+            cur.mtime = vfmj["mtime"].get<time_t>();
+            cur.version = vfmj["ver"].get<int>();
+            cur.isDeleted = vfmj["dm"].get<int>();
+            ChecksumCalculator::unHex(vfmj["md5"].get<std::string>(), cur.md5, MD5_DIGEST_LENGTH);
+            cur.numChunks = vfmj["numChunks"].get<int>();
+            // staged last modified time
+            time_t staged_mtime = vfmj["sg_mtime"].get<time_t>();
+            if (mtime > cur.mtime)
+            {
+                cur.mtime = staged_mtime;
+                cur.atime = staged_mtime;
+                cur.size = vfmj["sg_size"].get<unsigned long int>();
+            }
+            cur.storageClass = vfmj["sc"].get<std::string>();
+
+            delete vfmjPtr;
         }
         // do not add delete marker to the list unless for queries on versions
         if (!withVersions && cur.isDeleted)
@@ -1269,8 +1322,39 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
         }
         if (withVersions && cur.version > 0)
         {
-            // get version information
+            // get all version information
+            cur.numVersions = fmj["verId"].size();
+            try
+            {
+                cur.versions = new VersionInfo[cur.numVersions];
+                for (size_t vi = 0; vi < cur.numVersions; vi++)
+                {
+                    cur.versions[vi].version = fmj["verId"][vi].get<int>();
+                    std::string verSummary = fmj["verSummary"][vi].get<std::string>();
+                    std::stringstream ss(verSummary);
+                    string item;
+                    std::vector<string> items;
+                    while (ss >> item)
+                    {
+                        items.push_back(item);
+                    }
+                    cur.versions[vi].size = strtoul(items[0].c_str(), nullptr, 0);
+                    cur.versions[vi].mtime = strtol(items[1].c_str(), nullptr, 0);
+                    ChecksumCalculator::unHex(items[2].c_str(), cur.versions[vi].md5, MD5_DIGEST_LENGTH);
+                    cur.versions[vi].isDeleted = atoi(items[3].c_str());
+                    cur.versions[vi].numChunks = atoi(items[4].c_str());
+
+                    DLOG(INFO) << "Add version " << cur.versions[vi].version << " size " << cur.versions[vi].size << " mtime " << cur.versions[vi].mtime << " deleted " << cur.versions[vi].isDeleted << " to version list of file " << cur.name;
+                }
+            }
+            catch (std::exception &e)
+            {
+                LOG(ERROR) << "Cannot allocate memory for " << cur.numVersions << " version records";
+                cur.versions = 0;
+            }
         }
+
+        delete fmjPtr;
         numFiles++;
     }
 
@@ -1278,6 +1362,8 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
     FDBFuture *cmt = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
+
+    DLOG(INFO) << "FDBMetaStore::getFileList() finished";
 
     return 0;
 }
