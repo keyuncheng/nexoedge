@@ -1365,7 +1365,72 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
 
 unsigned int FDBMetaStore::getFolderList(std::vector<std::string> &list, unsigned char namespaceId, std::string prefix, bool skipSubfolders)
 {
-    // TBD
+    std::lock_guard<std::mutex> lk(_lock);
+
+    // generate the prefix for pattern-based directory searching
+    prefix.append("a");
+    char filename[PATH_MAX];
+    genFileKey(namespaceId, prefix.c_str(), prefix.size(), filename);
+    std::string pattern = getFilePrefix(filename, /* no ending slash */ true).append("*");
+    ssize_t pfSize = pattern.size();
+    unsigned long int count = 0;
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // get all keys started with prefix in FDB_DIR_LIST_KEY
+    std::string dirListStr;
+    bool dirListExist = getValueInTX(tx, std::string(FDB_DIR_LIST_KEY), dirListStr);
+    if (dirListExist == false)
+    {
+        LOG(INFO) << "FDBMetaStore::getFolderList() directory list not exist";
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return 0;
+    }
+
+    nlohmann::json *dljPtr = new nlohmann::json();
+    auto &dlj = *dljPtr;
+    if (parseStrToJSONObj(dirListStr, dlj) == false)
+    {
+        exit(1);
+    }
+
+    for (auto &dir : dlj["list"])
+    {
+        std::string dirStr = dir.get<std::string>();
+        // filter invalid strings
+        if (dirStr.size() < pfSize - 1)
+        {
+            continue;
+        }
+        // check if pattern exists in dirStr
+        if (dirStr.compare(0, pfSize, pattern) != 0)
+        {
+            continue;
+        }
+        // skip subfolders
+        if (skipSubfolders && strchr(dirStr.c_str() + pfSize - 1, '/') != 0)
+        {
+            continue;
+        }
+        list.push_back(dirStr.substr(pfSize - 1));
+        count++;
+
+        DLOG(INFO) << "Add " << dirStr << " to the result of " << pattern;
+    }
+
+    delete dljPtr;
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
     return 0;
 }
 
