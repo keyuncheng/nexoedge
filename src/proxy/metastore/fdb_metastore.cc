@@ -1442,14 +1442,27 @@ unsigned long int FDBMetaStore::getMaxNumKeysSupported()
 
 unsigned long int FDBMetaStore::getNumFiles()
 {
-    // TBD
+    std::lock_guard<std::mutex> lk(_lock);
+    unsigned long int count = 0;
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // TBD!!!
+
     return 0;
 }
 
 unsigned long int FDBMetaStore::getNumFilesToRepair()
 {
-    // TBD
-    return 0;
+    std::lock_guard<std::mutex> lk(_lock);
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    return count;
 }
 
 int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
