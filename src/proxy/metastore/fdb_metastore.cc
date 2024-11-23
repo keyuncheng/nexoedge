@@ -1490,7 +1490,63 @@ unsigned long int FDBMetaStore::getNumFilesToRepair()
 
 int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
 {
-    // TBD
+    std::lock_guard<std::mutex> lk(_lock);
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    std::string fileRepairStr;
+    bool fileRepairExist = getValueInTX(tx, std::string(FDB_FILE_REPAIR_KEY), fileRepairStr);
+
+    if (fileRepairExist == false)
+    {
+        LOG(WARNING) << "FDBMetaStore::getNumFilesToRepair() Error finding file repair list";
+        return -1; // same as Redis-based MetaStore
+    }
+
+    nlohmann::json *frjPtr = new nlohmann::json();
+    auto &frj = *frjPtr;
+    if (parseStrToJSONObj(fileRepairStr, frj) == false)
+    {
+        exit(1);
+    }
+    unsigned long int count = frj["list"].size();
+
+    if (count < numFiles)
+    {
+        LOG(ERROR) << "FDBMetaStore::getFilesToRepair() insufficient number of files " << count << " files";
+
+        delete frjPtr;
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return -1;
+    }
+
+    int numFilesToRepair = 0;
+    for (int i = 0; i < numFiles; i++)
+    {
+        // remove the last element
+        std::string fileName = frj["list"].back().get<std::string>();
+        free(files[numFilesToRepair].name);
+        if (!getNameFromFileKey(fileName.c_str(), fileName.size(), &files[numFilesToRepair].name, files[numFilesToRepair].nameLength, files[numFilesToRepair].namespaceId, &files[numFilesToRepair].version))
+        {
+            continue;
+        }
+        frj["list"].erase(frj["list"].rbegin());
+        numFilesToRepair++;
+    }
+
+    delete frjPtr;
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
     return 0;
 }
 
