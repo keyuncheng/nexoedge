@@ -24,7 +24,7 @@
 #define FDB_DIR_LIST_KEY "//snccDirList"
 #define FDB_JL_LIST_KEY "//snccJournalFSet"
 // new keys
-#define FDB_NUM_FILES_KEY "//snccFSize"
+#define FDB_NUM_FILES_KEY "//snccFileNum"
 
 #define FDB_MAX_KEY_SIZE (64)
 #define FDB_NUM_REQ_FIELDS (10)
@@ -322,6 +322,19 @@ bool FDBMetaStore::putMeta(const File &f)
     delete dljPtr;
 
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(dljStr.c_str()), dljStr.size());
+
+    // add file number count
+    std::string numFilesStr;
+    bool numFilesExist = getValueInTX(tx, std::string(FDB_NUM_FILES_KEY), numFilesStr);
+    if (numFilesExist == false)
+    {
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>("1"), 1);
+    }
+    else
+    {
+        int numFiles = std::stoi(numFilesStr);
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>(std::to_string(numFiles + 1).c_str()), std::to_string(numFiles + 1).size());
+    }
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -774,6 +787,16 @@ bool FDBMetaStore::deleteMeta(File &f)
 
         fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(dljStr.c_str()), dljStr.size());
     }
+
+    // update file count
+    std::string numFilesStr;
+    bool numFilesExist = getValueInTX(tx, std::string(FDB_NUM_FILES_KEY), numFilesStr);
+    if (numFilesExist == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::deleteMeta() Error finding file count";
+        exit(1);
+    }
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>(std::to_string(std::stoi(numFilesStr) - 1).c_str()), std::to_string(std::stoi(numFilesStr) - 1).size());
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -1449,7 +1472,12 @@ unsigned long int FDBMetaStore::getNumFiles()
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
-    // TBD!!!
+    // get all keys
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
 
     return 0;
 }
