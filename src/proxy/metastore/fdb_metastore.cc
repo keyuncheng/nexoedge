@@ -1204,16 +1204,20 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
         exitOnError(fdb_future_block_until_ready(keyRangeFut));
 
         const FDBKey *keyArray = nullptr;
-        int keyCount;
+        int keyCount = 0;
 
         exitOnError(fdb_future_get_key_array(keyRangeFut, &keyArray, &keyCount));
         fdb_future_destroy(keyRangeFut);
         keyRangeFut = nullptr;
 
+        LOG(INFO) << std::to_string(namespaceId) << " " << prefixWithNS << " " << keyCount;
+
         for (int idx = 0; idx < keyCount; idx++)
         {
+            LOG(INFO) << idx << keyArray[idx].key;
             std::string keyStr(reinterpret_cast<const char *>(keyArray[idx].key), keyArray[idx].key_length);
             candidateFileKeys.push_back(keyStr);
+            LOG(INFO) << idx << " " << keyStr;
         }
     }
     else
@@ -1572,9 +1576,12 @@ int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
         {
             continue;
         }
-        frj["list"].erase(frj["list"].end());
+        frj["list"].erase(frj["list"].begin() + frj["list"].size() - 1);
         numFilesToRepair++;
     }
+
+    std::string frjStr = frj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_FILE_REPAIR_KEY), std::string(FDB_FILE_REPAIR_KEY).size(), reinterpret_cast<const uint8_t *>(frjStr.c_str()), frjStr.size());
 
     delete frjPtr;
 
@@ -1583,17 +1590,17 @@ int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    return 0;
+    return numFilesToRepair;
 }
 
 bool FDBMetaStore::markFileAsRepaired(const File &file)
 {
-    return markFileRepairStatus(file, true);
+    return markFileRepairStatus(file, false);
 }
 
 bool FDBMetaStore::markFileAsNeedsRepair(const File &file)
 {
-    return markFileRepairStatus(file, false);
+    return markFileRepairStatus(file, true);
 }
 
 bool FDBMetaStore::markFileRepairStatus(const File &file, bool needsRepair)
@@ -1625,36 +1632,42 @@ bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool s
     // check listName
     std::string listStr;
     bool listExist = getValueInTX(tx, std::string(listName), listStr);
-    if (listExist == false)
-    {
-        LOG(ERROR) << "FDBMetaStore::markFileStatus() Error finding list " << listName;
-
-        // commit transaction
-        FDBFuture *cmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(cmt));
-        fdb_future_destroy(cmt);
-
-        return false;
-    }
 
     nlohmann::json *ljPtr = new nlohmann::json();
     auto &lj = *ljPtr;
-    if (parseStrToJSONObj(listStr, lj) == false)
+
+    int retVal = 0;
+
+    if (listExist == false)
     {
-        exit(1);
+        lj["list"] = nlohmann::json::array();
     }
+    else
+    {
+        if (parseStrToJSONObj(listStr, lj) == false)
+        {
+            exit(1);
+        }
+    }
+
+    bool found = (std::find(lj["list"].begin(), lj["list"].end(), std::string(verFileKey, verFileKeyLength)) != lj["list"].end()); 
 
     if (set == false)
     {
-        // remove the file from the list
-        lj["list"].erase(std::remove(lj["list"].begin(), lj["list"].end(), std::string(verFileKey, verFileKeyLength)), lj["list"].end());
+        if (found == true)
+        {
+            // remove the file from the list
+            lj["list"].erase(std::remove(lj["list"].begin(), lj["list"].end(), std::string(verFileKey, verFileKeyLength)), lj["list"].end());
+            retVal = 1;
+        }
     }
     else
     {
         // add the file to the list
-        if (std::find(lj["list"].begin(), lj["list"].end(), std::string(verFileKey, verFileKeyLength)) == lj["list"].end())
+        if (found == false)
         {
             lj["list"].push_back(std::string(verFileKey, verFileKeyLength));
+            retVal = 1;
         }
     }
 
@@ -1669,7 +1682,7 @@ bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool s
 
     DLOG(INFO) << "FDBMetaStore::markFileStatus() File " << file.name << "(" << std::string(verFileKey) << ")" << (set ? " added to" : " removed from") << " the " << opName << " list";
 
-    return false;
+    return retVal;
 }
 
 int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
@@ -1738,7 +1751,7 @@ int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
     _endOfPendingWriteSet = false;
 
     std::string fileKey = fpwj["list"].back().get<std::string>();
-    fpwj.erase(fpwj["list"].end());
+    fpwj.erase(fpwj["list"].begin() + fpwj["list"].size() - 1);
 
     std::string fpwjStr = fpwj.dump();
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePendingWriteCopyKey.c_str()), filePendingWriteCopyKey.size(), reinterpret_cast<const uint8_t *>(fpwjStr.c_str()), fpwjStr.size());

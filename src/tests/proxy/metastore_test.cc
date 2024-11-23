@@ -137,10 +137,10 @@ int main(int argc, char **argv) {
     checkUnlock();
     printf("> Test %d completed: Unlock %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
-    // test 5: file listing
-    mytimer.start();
-    metaList(metastore);
-    printf("> Test %d completed: List %lu files in %.6lf seconds\n", ++testCount, numFilesToTest, nanoSecToSec(mytimer.elapsed().wall));
+    // // test 5: file listing
+    // mytimer.start();
+    // metaList(metastore);
+    // printf("> Test %d completed: List %lu files in %.6lf seconds\n", ++testCount, numFilesToTest, nanoSecToSec(mytimer.elapsed().wall));
 
     // test 6: file repair list
     mytimer.start();
@@ -320,7 +320,7 @@ static void initFiles() {
             memset(f[i].codingMeta.codingState, rand() % 256, f[i].codingMeta.codingStateSize);
         }
 
-        //printf("Init file %d with name %s and size %lu in namespace %d using code %d\n", i, f[i].name, f[i].size, f[i].namespaceId, f[i].codingMeta.coding);
+        //printf("Init file %lu with name %s and size %lu in namespace %d using code %d\n", i, f[i].name, f[i].size, f[i].namespaceId, f[i].codingMeta.coding);
         // add it to the map by namespace id
         if (fileMapByNamespace.count(f[i].namespaceId) == 0) {
             std::map<std::string, File*> fileMap;
@@ -806,6 +806,7 @@ void metaForRepair(MetaStore *metastore) {
     // get files to repair (TODO test batch?), and mark them as repaired
     for (size_t i = 0; i < numFilesToTest; i++) {
         File rf[1];
+        
         if (!metastore->getFilesToRepair(1, rf)) {
             try {
                 File *of = fileMapByNamespace.at(rf[0].namespaceId).at(std::string(rf[0].name, rf[0].nameLength));
