@@ -19,6 +19,7 @@ static const unsigned long maxFileSize = (unsigned long) (1 << 30) * 4; // 4GB
 static int chunkSize = (1 << 20); // 1MB
 
 static File f[numFilesToTest];
+static File *of = nullptr;
 static MetaStore *metastore = NULL;
 static std::map<int, std::map<std::string, File*>> fileMapByNamespace;
 
@@ -32,7 +33,15 @@ static void updateFileContainers(size_t);
 static void updateFiles();
 static bool compareFile(size_t, const File&, const File&);
 static void exitWithError();
+
+static size_t getNumPortionFilesToTest();
+static void preMetaUpdate();
+static void preRename();
+static void preUpdateTimestamps();
 static void readAndCheckFileMeta();
+static void checkLock();
+static void checkUnlock();
+static void checkRename(const size_t);
 
 void metaWrite(MetaStore *);
 void metaUpdate(MetaStore *);
@@ -46,6 +55,8 @@ size_t metaUpdateTimestamps(MetaStore *);
 void metaGetByUuid(MetaStore *);
 void metaGetFolders(MetaStore *);
 
+static double nanoSecToSec(unsigned long);
+static double getThp(size_t, unsigned long);
 
 int main(int argc, char **argv) {
 
@@ -100,65 +111,83 @@ int main(int argc, char **argv) {
     boost::timer::cpu_timer mytimer;
     // test 1: file metadata write
     metaWrite(metastore);
-    printf("> Test %d completed: Write metadata of %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    auto duration = mytimer.elapsed().wall;
+    readAndCheckFileMeta();
+    printf("> Test %d completed: Write metadata of %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
     // test 2: file metadata update
+    preMetaUpdate();
     mytimer.start();
     metaUpdate(metastore);
-    printf("> Test %d completed: Update metadata of %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    duration = mytimer.elapsed().wall;
+    readAndCheckFileMeta();
+    printf("> Test %d completed: Update metadata of %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
     // test 3: file lock
     mytimer.start();
     metaLock(metastore);
-    printf("> Test %d completed: Lock %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    duration = mytimer.elapsed().wall;
+    checkLock();
+    printf("> Test %d compeltes: Lock %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
     // test 4: file unlock
     mytimer.start();
     metaUnlock(metastore);
-    printf("> Test %d completed: Unlock %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    duration = mytimer.elapsed().wall;
+    checkUnlock();
+    printf("> Test %d completed: Unlock %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
-    // // test 5: file listing
-    // mytimer.start();
-    // metaList(metastore);
-    // printf("> Test %d completed: List %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    // test 5: file listing
+    mytimer.start();
+    metaList(metastore);
+    printf("> Test %d completed: List %lu files in %.6lf seconds\n", ++testCount, numFilesToTest, nanoSecToSec(mytimer.elapsed().wall));
 
-    // // test 6: file repair list
-    // mytimer.start();
-    // metaForRepair(metastore);
-    // printf("> Test %d completed: Mark and unmark %lu files for repair in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    // test 6: file repair list
+    mytimer.start();
+    metaForRepair(metastore);
+    duration = mytimer.elapsed().wall;
+    printf("> Test %d completed: Mark and unmark %lu files for repair in %.6lf seconds\n", ++testCount, numFilesToTest, nanoSecToSec(duration));
 
     // test 7: file renaming
+    preRename();
     mytimer.start();
     size_t numFilesTested = metaRename(metastore);
-    printf("> Test %d completed: Rename %lu files in %.3lf seconds\n", ++testCount, numFilesTested , mytimer.elapsed().wall / 1e9);
+    duration = mytimer.elapsed().wall;
+    checkRename(numFilesTested);
+    printf("> Test %d completed: Rename %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesTested, nanoSecToSec(duration), getThp(numFilesTested, duration));
 
     // test 8: file timestamp updates
+    preUpdateTimestamps();
     mytimer.start();
     numFilesTested = metaUpdateTimestamps(metastore);
-    printf("> Test %d completed: Update %lu files' timestamps in %.3lf seconds\n", ++testCount, numFilesTested, mytimer.elapsed().wall / 1e9);
+    duration = mytimer.elapsed().wall;
+    readAndCheckFileMeta();
+    printf("> Test %d completed: Update %lu files' timestamps in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesTested, nanoSecToSec(duration), getThp(numFilesTested, duration));
 
     // test 9: file name by uuid
     mytimer.start();
     metaGetByUuid(metastore);
-    printf("> Test %d completed: Get %lu file names by UUID in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    duration = mytimer.elapsed().wall;
+    printf("> Test %d completed: Get %lu file names by UUID in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
-    // test 10: folder list
+    // test XX: folder list
     //mytimer.start();
     //metaGetFolders(metastore);
-    //printf("> Test %d completed: Get folder lists for %lu times in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    //printf("> Test %d completed: Get folder lists for %lu times in %.6lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     //// test XX: file status
     //mytimer.start();
-    //printf("> Test %d completed: Test file timestamps update in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    //printf("> Test %d completed: Test file timestamps update in %.6lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     //// test XX: journaling
     //mytimer.start();
-    //printf("> Test %d completed: Test file timestamps update in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    //printf("> Test %d completed: Test file timestamps update in %.6lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
 
     // test 11: file metadata delete
     mytimer.start();
     metaDelete(metastore);
-    printf("> Test %d completed: Delete %lu files in %.3lf seconds\n", ++testCount, numFilesToTest, mytimer.elapsed().wall / 1e9);
+    duration = mytimer.elapsed().wall;
+    printf("> Test %d completed: Delete %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
     printf("End of MetaStore Test\n");
     printf("=====================\n");
@@ -543,6 +572,37 @@ static void exitWithError() {
     exit(1);
 }
 
+static size_t getNumPortionFilesToTest() {
+    size_t portion = 2;
+    size_t numFiles = numFilesToTest / portion;
+    if (numFiles< 1) {
+        numFiles= 1;
+    }
+    return numFiles;
+}
+
+static void preMetaUpdate() {
+    updateFiles();
+}
+
+static void preRename() {
+    size_t numFilesToRename = getNumPortionFilesToTest();
+    // backup the file names before rename for operation and non-existance check
+    of = new File[numFilesToRename];
+    for (size_t i = 0; i < numFilesToRename; i++) {
+        of[i].copyNameAndSize(f[i]);
+    }
+    updateFileNames(numFilesToRename);
+}
+
+static void preUpdateTimestamps() {
+    size_t numFilesToUpdate = getNumPortionFilesToTest();
+    // update the metadata timestamps
+    for (size_t i = 0; i < numFilesToUpdate; i++) {
+        updateFileTimestamps(numFilesToUpdate);
+    }
+}
+
 static void readAndCheckFileMeta() {
     for (size_t i = 0; i < numFilesToTest; i++) {
         // get metadata
@@ -554,6 +614,47 @@ static void readAndCheckFileMeta() {
         }
         // check metadata
         if (!compareFile(i, f[i], rf)) {
+            exitWithError();
+        }
+    }
+}
+
+static void checkLock() {
+    // check if the files are exclusively locked
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (metastore->lockFile(f[i])) {
+            printf(">> Failed to prevent locking of locked file %lu\n", i);
+            exitWithError();
+        }
+    }
+}
+
+static void checkUnlock() {
+    // lock should suceed after unlock
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->lockFile(f[i])) {
+            printf(">> Failed to lock file %lu after unlock\n", i);
+            exitWithError();
+        }
+    }
+    // unlock files
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->unlockFile(f[i])) {
+            printf(">> Failed to unlock file %lu (second attempt)\n", i);
+            exitWithError();
+        }
+    }
+}
+
+static void checkRename(const size_t numFilesToRename) {
+    readAndCheckFileMeta();
+
+    // check the rename result by query using the old name (and expect failures)
+    for (size_t i = 0; i < numFilesToRename; i++) {
+        File rf;
+        rf.copyName(of[i]);
+        if (metastore->getMeta(rf) == true) {
+            printf(">> Failed to get the expected failure reply for the %lu renamed file.\n", i);
             exitWithError();
         }
     }
@@ -571,17 +672,12 @@ void metaWrite(MetaStore* metastore) {
             printf(">> Failed to put file %lu metadata\n", i);
             exitWithError();
         }
-    // read back and check
-    readAndCheckFileMeta();
 }
 
 void metaUpdate(MetaStore* metastore) {
     // update file metadata
-    updateFiles();
     for (size_t i = 0; i < numFilesToTest; i++)
         metastore->putMeta(f[i]);
-    // read back and check
-    readAndCheckFileMeta();
 }
 
 void metaLock(MetaStore *metastore) {
@@ -592,10 +688,6 @@ void metaLock(MetaStore *metastore) {
     for (size_t i = 0; i < numFilesToTest; i++) {
         if (!metastore->lockFile(f[i])) {
             printf(">> Failed to lock file %lu\n", i);
-            exitWithError();
-        }
-        if (metastore->lockFile(f[i])) {
-            printf(">> Failed to prevent locking of locked file %lu\n", i);
             exitWithError();
         }
     }
@@ -686,20 +778,6 @@ void metaUnlock(MetaStore *metastore) {
             exitWithError();
         }
     }
-    // lock should suceed after unlock
-    for (size_t i = 0; i < numFilesToTest; i++) {
-        if (!metastore->lockFile(f[i])) {
-            printf(">> Failed to lock file %lu after unlock\n", i);
-            exitWithError();
-        }
-    }
-    // unlock files
-    for (size_t i = 0; i < numFilesToTest; i++) {
-        if (!metastore->unlockFile(f[i])) {
-            printf(">> Failed to unlock file %lu (second attempt)\n", i);
-            exitWithError();
-        }
-    }
 }
 
 void metaDelete(MetaStore *metastore) { 
@@ -759,18 +837,7 @@ void metaForRepair(MetaStore *metastore) {
 }
 
 size_t metaRename(MetaStore *metastore) {
-    size_t portionToRename = 2;
-    size_t numFilesToRename = numFilesToTest / portionToRename;
-    if (numFilesToRename < 1) {
-        numFilesToRename = 1;
-    }
-    // backup the file names before rename for operation and non-existance check
-    File of[numFilesToTest];
-    for (size_t i = 0; i < numFilesToRename; i++) {
-        of[i].copyNameAndSize(f[i]);
-    }
-   
-    updateFileNames(numFilesToRename);
+    size_t numFilesToRename = getNumPortionFilesToTest();
 
     // perform the rename operations
     for (size_t i = 0; i < numFilesToRename; i++) {
@@ -782,29 +849,11 @@ size_t metaRename(MetaStore *metastore) {
         }
     }
 
-    readAndCheckFileMeta();
-
-    // check the rename result by query using the old name (and expect failures)
-    for (size_t i = 0; i < numFilesToRename; i++) {
-        File rf;
-        rf.copyName(of[i]);
-        if (metastore->getMeta(rf) == true) {
-            printf(">> Failed to get the expected failure reply for the %lu renamed file.\n", i);
-            exitWithError();
-        }
-    }
-
     return numFilesToRename;
 }
 
 size_t metaUpdateTimestamps(MetaStore *metastore) {
-    size_t portionToUpdate = 2;
-    size_t numFilesToUpdate = numFilesToTest / portionToUpdate;
-    
-    // update the metadata timestamps
-    for (size_t i = 0; i < numFilesToUpdate; i++) {
-        updateFileTimestamps(numFilesToUpdate);
-    }
+    size_t numFilesToUpdate = getNumPortionFilesToTest();
 
     // update metadata in the metastore
     for (size_t i = 0; i < numFilesToUpdate; i++) {
@@ -817,8 +866,6 @@ size_t metaUpdateTimestamps(MetaStore *metastore) {
         }
     }
  
-    readAndCheckFileMeta();
-
     return numFilesToUpdate;
 }
 
@@ -842,3 +889,11 @@ void metaGetFolders(MetaStore *metastore) {
     std::vector<std::string> folderList;   
 }
 
+
+static double nanoSecToSec(unsigned long timeInNs) {
+    return timeInNs / 1e9;
+}
+
+static double getThp(size_t numOps, unsigned long timeInNs) {
+    return numOps / (timeInNs / 1e9);
+}
