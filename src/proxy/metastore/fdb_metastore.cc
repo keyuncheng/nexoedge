@@ -1462,6 +1462,29 @@ unsigned long int FDBMetaStore::getNumFilesToRepair()
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
+    std::string fileRepairStr;
+    bool fileRepairExist = getValueInTX(tx, std::string(FDB_FILE_REPAIR_KEY), fileRepairStr);
+
+    if (fileRepairExist == false)
+    {
+        LOG(WARNING) << "FDBMetaStore::getNumFilesToRepair() Error finding file repair list";
+        return -1; // same as Redis-based MetaStore
+    }
+
+    nlohmann::json *frjPtr = new nlohmann::json();
+    auto &frj = *frjPtr;
+    if (parseStrToJSONObj(fileRepairStr, frj) == false)
+    {
+        exit(1);
+    }
+    unsigned long int count = frj["list"].size();
+    delete frjPtr;
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
     return count;
 }
 
