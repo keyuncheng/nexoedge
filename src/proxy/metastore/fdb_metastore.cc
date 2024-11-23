@@ -1536,7 +1536,7 @@ int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
         {
             continue;
         }
-        frj["list"].erase(frj["list"].rbegin());
+        frj["list"].erase(frj["list"].end());
         numFilesToRepair++;
     }
 
@@ -1645,19 +1645,202 @@ bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool s
 
 int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
 {
-    // TBD
-    return false;
+    // TODO: this implementation is not checked correctness for now
+
+    std::lock_guard<std::mutex> lk(_lock);
+
+    int retVal = 0;
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    std::string filePendingWriteStr;
+    std::string filePendingWriteCopyKey = std::string(FDB_FILE_PENDING_WRITE_KEY) + std::string("_copy");
+    bool filePendingWriteExist = getValueInTX(tx, filePendingWriteCopyKey, filePendingWriteStr);
+
+    if (filePendingWriteExist == false)
+    {
+        LOG(WARNING) << "FDBMetaStore::getFilesPendingWriteToCloud() Error finding file pending write list";
+
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return retVal; // same as Redis-based MetaStore
+    }
+
+    nlohmann::json *fpwjPtr = new nlohmann::json();
+    auto &fpwj = *fpwjPtr;
+    if (parseStrToJSONObj(filePendingWriteStr, fpwj) == false)
+    {
+        exit(1);
+    }
+
+    int numFilesToRepair = 0;
+    numFilesToRepair = fpwj["list"].size();
+
+    if (numFilesToRepair == 0 && !_endOfPendingWriteSet)
+    {
+        _endOfPendingWriteSet = true;
+
+        delete fpwjPtr;
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+        return retVal;
+    }
+
+    // refill the set for scan
+    if (numFilesToRepair == 0)
+    {
+
+        delete fpwjPtr;
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+        return retVal;
+    }
+
+    // mark the set scanning is in-progress
+    _endOfPendingWriteSet = false;
+
+    std::fileKey = fpwj["list"].back().get<std::string>();
+    fpwj.erase(fpwj["list"].end());
+
+    std::string fpwjStr = fpwj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePendingWriteCopyKey.c_str()), filePendingWriteCopyKey.size(), reinterpret_cast<const uint8_t *>(fpwjStr.c_str()), fpwjStr.size());
+
+    delete fpwjPtr;
+
+    // add the key to filePendingWriteCompleteKey
+    std::string filePendingWriteCompStr;
+    bool filePendingWriteCompExist = getValueInTX(tx, std::string(FDB_FILE_PENDING_WRITE_COMP_KEY), filePendingWriteCompStr);
+
+    nlohmann::json *fpwcPtr = new nlohmann::json();
+    auto &fpwc = *fpwcPtr;
+
+    if (filePendingWriteCompExist == false)
+    {
+        fpwc["list"] = nlohhmann::json::array();
+    }
+    else
+    {
+        if (parseStrToJSONObj(filePendingWriteCompStr, fpwc) == false)
+        {
+            exit(1);
+        }
+    }
+
+    bool addToList = false;
+
+    if (std::find(fpwc["list"].begin(), fpwc["list"].end(), fileKey) == fpwc["list"].end())
+    {
+        fpwc["list"].push_back(fileKey);
+        addToList = true;
+    }
+
+    if (addToList && getNameFromFileKey(fileKey.data(), fileKey.length(), &files[0].name, files[0].nameLength, files[0].namespaceId, &files[0].version))
+    {
+        retVal = 1;
+    }
+
+    delete fpwcPtr;
+
+    std::string fpwcStr = fpwc.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_FILE_PENDING_WRITE_COMP_KEY), strlen(FDB_FILE_PENDING_WRITE_COMP_KEY), reinterpret_cast<const uint8_t *>(fpwcStr.c_str()), fpwcStr.size());
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
+    return retVal;
 }
 
 bool FDBMetaStore::updateFileStatus(const File &file)
 {
-    // TBD
+    // TODO: this implementation is not checked correctness for now
+    std::lock_guard<std::mutex> lk(_lock);
+    char fileKey[PATH_MAX];
+    int fileKeyLength = genFileKey(file.namespaceId, file.name, file.nameLength, fileKey);
+    bool ret = false;
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    if (file.status == FileStatus::PART_BG_TASK_COMPLETED)
+    {
+        // decrement number of task by 1, and remove the file is the number of pending task drops to 0
+    }
+    else if (file.status == FileStatus::BG_TASK_PENDING)
+    {
+        // increment number of task by 1
+    }
+    else if (file.status == FileStatus::ALL_BG_TASKS_COMPLETED)
+    {
+        // remove the file from the list
+    }
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
     return false;
 }
 
 bool FDBMetaStore::getNextFileForTaskCheck(File &file)
 {
-    // TBD
+    std::lock_guard<std::mutex> lk(_lock);
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    std::string bgTaskPendingStr;
+    bool bgTaskPendingExist = getValueInTX(tx, std::string(FDB_BG_TASK_PENDING_KEY), bgTaskPendingStr);
+
+    if (bgTaskPendingExist == false)
+    {
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return false; // same as Redis-based MetaStore
+    }
+
+    nlohmann::json *btpjPtr = new nlohmann::json();
+    auto &btpj = *btpjPtr;
+    if (parseStrToJSONObj(bgTaskPendingStr, btpj) == false)
+    {
+        exit(1);
+    }
+
+    std::string fileKey = btpj["list"].back().get<std::string>();
+    char *d = strchr(fileKey.c_str(), '_');
+    if (d != nullptr)
+    {
+        file.nameLength = fileKey.size() - (d - fileKey.c_str() + 1);
+        file.name = (char *)malloc(file.nameLength + 1);
+        memcpy(file.name, d + 1, file.nameLength);
+        file.name[file.nameLength] = '\0';
+        file.namespaceId = atoi(fileKey.c_str());
+        DLOG(INFO) << "Next file to check: " << file.name << ", " << (int)file.namespaceId;
+    }
+
+    delete btpjPtr;
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
     return true;
 }
 
