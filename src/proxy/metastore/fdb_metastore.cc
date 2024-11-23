@@ -1578,7 +1578,68 @@ bool FDBMetaStore::markFileAsWrittenToCloud(const File &file, bool removePending
 
 bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool set, const char *opName)
 {
-    // TBD
+    std::lock_guard<std::mutex> lk(_lock);
+    char fileKey[PATH_MAX];
+    int verFileKeyLength = genFileKey(file.namespaceId, file.name, file.nameLength, fileKey);
+
+    // create transaction
+    FDBTransaction *tx;
+    exitOnError(fdb_database_create_transaction(_db, &tx));
+
+    // check listName
+    std::string listStr;
+    bool listExist = getValueInTX(tx, std::string(listName), listStr);
+    if (listExist == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::markFileStatus() Error finding list " << listName;
+
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return false;
+    }
+
+    nlohmann::json *ljPtr = new nlohmann::json();
+    auto &lj = *ljPtr;
+    if (parseStrToJSONObj(listStr, lj) == false)
+    {
+        LOG(ERROR) << "FDBMetaStore::markFileStatus() Error finding file in list " << listName;
+
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
+
+        return false;
+    }
+
+    if (set == false)
+    {
+        // remove the file from the list
+        lj["list"].erase(std::remove(lj["list"].begin(), lj["list"].end(), std::string(fileKey, verFileKeyLength)), lj["list"].end());
+    }
+    else
+    {
+        // add the file to the list
+        if (std::find(lj["list"].begin(), lj["list"].end(), std::string(fileKey, verFileKeyLength)) == lj["list"].end())
+        {
+            lj["list"].push_back(std::string(fileKey, verFileKeyLength));
+        }
+    }
+
+    std::string ljStr = lj.dump();
+    delete ljPtr;
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(listName), strlen(listName), reinterpret_cast<const uint8_t *>(ljStr.c_str()), ljStr.size());
+
+    // commit transaction
+    FDBFuture *cmt = fdb_transaction_commit(tx);
+    exitOnError(fdb_future_block_until_ready(cmt));
+    fdb_future_destroy(cmt);
+
+    DLOG(INFO) << "File " << file.name << "(" << std::string(fileKey) << ")" << (set ? " added to" : " removed from") << " the " << opName << " list";
+
     return false;
 }
 
