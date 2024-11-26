@@ -1199,8 +1199,14 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
     { // get keys started with prefix
         // get all keys started with prefixWithNS
         std::string prefixWithNS = std::to_string(namespaceId) + "_" + prefix;
+        // prefixWithNSEnd = concatenate (prefixWithNS[:-1], prefixWithNS[-1]+1);
+        unsigned char prefixWithNSEnd[PATH_MAX];
+        strncpy(reinterpret_cast<char *>(prefixWithNSEnd), prefixWithNS.c_str(), prefixWithNS.size());
+        prefixWithNSEnd[prefixWithNS.size() - 1]++;
 
-        FDBFuture *keyRangeFut = fdb_transaction_get_key(tx, FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNS.c_str()), prefixWithNS.size()), 0); // not set snapshot
+        LOG(INFO) << prefixWithNS;
+        LOG(INFO) << std::string(reinterpret_cast<char *>(prefixWithNSEnd), prefixWithNS.size());
+        FDBFuture *keyRangeFut = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNS.c_str(), prefixWithNS.size()), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNSEnd, prefixWithNS.size()), 0, 0, FDB_STREAMING_MODE_SERIAL, 0, 0, 0);
         exitOnError(fdb_future_block_until_ready(keyRangeFut));
 
         const FDBKey *keyArray = nullptr;
@@ -1211,6 +1217,8 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
         keyRangeFut = nullptr;
 
         LOG(INFO) << std::to_string(namespaceId) << " " << prefixWithNS << " " << keyCount;
+        // std::string keyStr(reinterpret_cast<const uint8_t *>keyArray, keyCount);
+        // LOG(INFO) << keyStr;
 
         for (int idx = 0; idx < keyCount; idx++)
         {
