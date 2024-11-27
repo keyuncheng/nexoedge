@@ -1204,28 +1204,27 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
         strncpy(reinterpret_cast<char *>(prefixWithNSEnd), prefixWithNS.c_str(), prefixWithNS.size());
         prefixWithNSEnd[prefixWithNS.size() - 1]++;
 
-        LOG(INFO) << prefixWithNS;
-        LOG(INFO) << std::string(reinterpret_cast<char *>(prefixWithNSEnd), prefixWithNS.size());
-        FDBFuture *keyRangeFut = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNS.c_str(), prefixWithNS.size()), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNSEnd, prefixWithNS.size()), 0, 0, FDB_STREAMING_MODE_SERIAL, 0, 0, 0);
-        exitOnError(fdb_future_block_until_ready(keyRangeFut));
+        FDBFuture *kvRangeFut = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNS.c_str()), prefixWithNS.size()), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNSEnd), prefixWithNS.size()), 0, 0, FDB_STREAMING_MODE_WANT_ALL, 0, 0, 0);
+        exitOnError(fdb_future_block_until_ready(kvRangeFut));
 
-        const FDBKey *keyArray = nullptr;
-        int keyCount = 0;
+        // TODO: fix while loop
+        const FDBKeyValue *kvArray = nullptr;
+        int totalKVCount = 0;
+        int curKVCount = 0;
+        fdb_bool_t moreKVs = 1;
 
-        exitOnError(fdb_future_get_key_array(keyRangeFut, &keyArray, &keyCount));
-        fdb_future_destroy(keyRangeFut);
-        keyRangeFut = nullptr;
+        exitOnError(fdb_future_get_keyvalue_array(kvRangeFut, &kvArray, &kvCount, &moreKVs));
+        fdb_future_destroy(kvRangeFut);
+        kvRangeFut = nullptr;
 
-        LOG(INFO) << std::to_string(namespaceId) << " " << prefixWithNS << " " << keyCount;
-        // std::string keyStr(reinterpret_cast<const uint8_t *>keyArray, keyCount);
-        // LOG(INFO) << keyStr;
+        
+        DLOG(INFO) << "get_range() " << prefixWithNS << " " << std::string(reinterpret_cast<char *>(prefixWithNSEnd), prefixWithNS.size()) << ": " << kvCount;
 
-        for (int idx = 0; idx < keyCount; idx++)
+        for (int idx = 0; idx < kvCount; idx++)
         {
-            LOG(INFO) << idx << keyArray[idx].key;
-            std::string keyStr(reinterpret_cast<const char *>(keyArray[idx].key), keyArray[idx].key_length);
+            std::string keyStr(reinterpret_cast<const char *>(kvArray[idx].key), kvArray[idx].key_length);
             candidateFileKeys.push_back(keyStr);
-            LOG(INFO) << idx << " " << keyStr;
+            LOG(INFO) << idx << " " << keyStr << " " << kvArray[idx].key_length;
         }
     }
     else
