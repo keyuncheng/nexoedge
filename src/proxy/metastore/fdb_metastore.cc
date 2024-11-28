@@ -13,6 +13,8 @@
 #include "../../common/define.hh"
 #include "../../common/checksum_calculator.hh"
 
+#include <boost/timer/timer.hpp>
+
 // change defs's prefix to FDB_
 #define FDB_FILE_PREFIX "//pf_"
 #define FDB_FILE_LOCK_KEY_PREFIX "//snccFLock_"
@@ -67,6 +69,15 @@ FDBMetaStore::~FDBMetaStore()
 
 bool FDBMetaStore::putMeta(const File &f)
 {
+    double overallTimeSec = 0, parsingTimeSec = 0;
+
+    // benchmark time (init)
+    boost::timer::cpu_timer overallTimer, parsingTimer;
+    boost::timer::nanosecond_type duration;
+
+    // benchmark time (start)
+    overallTimer.start();
+
     std::lock_guard<std::mutex> lk(_lock);
     char fileKey[PATH_MAX], verFileKey[PATH_MAX];
 
@@ -111,10 +122,18 @@ bool FDBMetaStore::putMeta(const File &f)
     }
     else
     { // File meta exists
+
+        // benchmark time (start)
+        parsingTimer.start();
+
         if (parseStrToJSONObj(fileMetaStr, fmj) == false)
         {
             exit(1);
         }
+
+        // benchmark time (end)
+        duration = parsingTimer.elapsed().wall;
+        parsingTimeSec += duration / 1e9;
 
         // check whether versioning is enabled
         bool keepVersion = !config.overwriteFiles();
@@ -155,8 +174,16 @@ bool FDBMetaStore::putMeta(const File &f)
         }
     }
 
+    // benchmark time (start)
+    parsingTimer.start();
+
     // Store file meta into FDB
     std::string fmjStr = fmj.dump();
+
+    // benchmark time (end)
+    duration = parsingTimer.elapsed().wall;
+    parsingTimeSec += duration / 1e9;
+
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
     delete fmjPtr;
 
@@ -243,7 +270,16 @@ bool FDBMetaStore::putMeta(const File &f)
         verFmj[blockNameStr.c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
     }
 
+    // benchmark time (start)
+    parsingTimer.start();
+
+    // Store file meta into FDB
     std::string verFmjStr = verFmj.dump();
+
+    // benchmark time (end)
+    duration = parsingTimer.elapsed().wall;
+    parsingTimeSec += duration / 1e9;
+
     // Store versioned file meta into FDB
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(verFmjStr.c_str()), verFmjStr.size());
     delete verFmjPtr;
@@ -259,6 +295,8 @@ bool FDBMetaStore::putMeta(const File &f)
     {
         fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fUUIDKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), f.nameLength);
     }
+
+    // TODO: modify file prefix set and directory list set
 
     // add filename to file Prefix Set
     std::string filePrefix = getFilePrefix(fileKey);
@@ -346,6 +384,10 @@ bool FDBMetaStore::putMeta(const File &f)
     fdb_future_destroy(cmt);
 
     // DLOG(INFO) << "FDBMetaStore:: putMeta() finished";
+
+    // benchmark time (end)
+    duration = overallTimer.elapsed().wall;
+    overallTimeSec += duration / 1e9;
 
     return true;
 }
