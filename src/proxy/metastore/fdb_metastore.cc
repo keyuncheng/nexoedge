@@ -44,7 +44,7 @@ FDBMetaStore::FDBMetaStore()
 
     // init network
     exitOnError(fdb_setup_network());
-    if (pthread_create(&_fdb_network_thread, NULL, FDBMetaStore::runNetwork, NULL))
+    if (pthread_create(&_fdb_network_thread, NULL, FDBMetaStore::runNetworkThread, NULL))
     {
         LOG(ERROR) << "FDBMetaStore::FDBMetaStore() failed to create network thread";
         exit(1);
@@ -1186,45 +1186,24 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
     if (namespaceId == INVALID_NAMESPACE_ID)
         namespaceId = Config::getInstance().getProxyNamespaceId();
 
-    // candidate fileKeys for listing
-    std::vector<std::string> candidateFileKeys;
-
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
     DLOG(INFO) << "FDBMetaStore::getFileList() " << "prefix = " << prefix;
 
+    // candidate file key and metadata for listing
+    std::vector<std::pair<std::string, std::string>> candidateFileMetas;
+
     if (prefix == "" || prefix.back() != '/')
     { // get keys started with prefix
         // get all keys started with prefixWithNS
         std::string prefixWithNS = std::to_string(namespaceId) + "_" + prefix;
-        // prefixWithNSEnd = concatenate (prefixWithNS[:-1], prefixWithNS[-1]+1);
-        unsigned char prefixWithNSEnd[PATH_MAX];
-        strncpy(reinterpret_cast<char *>(prefixWithNSEnd), prefixWithNS.c_str(), prefixWithNS.size());
-        prefixWithNSEnd[prefixWithNS.size() - 1]++;
 
-        FDBFuture *kvRangeFut = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNS.c_str()), prefixWithNS.size()), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixWithNSEnd), prefixWithNS.size()), 0, 0, FDB_STREAMING_MODE_WANT_ALL, 0, 0, 0);
-        exitOnError(fdb_future_block_until_ready(kvRangeFut));
-
-        // TODO: fix while loop
-        const FDBKeyValue *kvArray = nullptr;
-        int totalKVCount = 0;
-        int curKVCount = 0;
-        fdb_bool_t moreKVs = 1;
-
-        exitOnError(fdb_future_get_keyvalue_array(kvRangeFut, &kvArray, &kvCount, &moreKVs));
-        fdb_future_destroy(kvRangeFut);
-        kvRangeFut = nullptr;
-
-        
-        DLOG(INFO) << "get_range() " << prefixWithNS << " " << std::string(reinterpret_cast<char *>(prefixWithNSEnd), prefixWithNS.size()) << ": " << kvCount;
-
-        for (int idx = 0; idx < kvCount; idx++)
+        if (getKVPairsWithKeyPrefixInTX(tx, prefixWithNS, candidateFileMetas) == false)
         {
-            std::string keyStr(reinterpret_cast<const char *>(kvArray[idx].key), kvArray[idx].key_length);
-            candidateFileKeys.push_back(keyStr);
-            LOG(INFO) << idx << " " << keyStr << " " << kvArray[idx].key_length;
+            LOG(ERROR) << "FDBMetaStore::getFileList() Error getting file keys with prefix " << prefixWithNS;
+            exit(1);
         }
     }
     else
@@ -1244,27 +1223,39 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
             {
                 exit(1);
             }
-    
+
             // get all candidate fileKeys
-            for (auto &fileKey : fplj["list"])
+            for (int i = 0; i < fplj["list"].size(); i++)
             {
-                candidateFileKeys.push_back(fileKey.get<std::string>());
+                std::string fileKey = fplj["list"][i].get<std::string>();
+
+                std::string fileMetaStr;
+                bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
+                if (fileMetaExist == false)
+                {
+                    LOG(ERROR) << "FDBMetaStore::getFileList() failed to get metadata for file " << fileKey;
+                    continue;
+                }
+                candidateFileMetas.push_back(std::make_pair(fileKey, fileMetaStr));
             }
             delete fpljPtr;
         }
     }
 
     // init file list
-    if (candidateFileKeys.size() > 0)
+    if (candidateFileMetas.size() > 0)
     {
-        *list = new FileInfo[candidateFileKeys.size()];
+        *list = new FileInfo[candidateFileMetas.size()];
     }
 
     // count number of files
     int numFiles = 0;
 
-    for (auto &fileKey : candidateFileKeys)
+    for (auto &fileMeta : candidateFileMetas)
     {
+        std::string &fileKey = fileMeta.first;
+        std::string &fileMetaStr = fileMeta.second;
+
         if (isSystemKey(fileKey.c_str()))
         {
             continue;
@@ -1282,13 +1273,6 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
         // store in FileInfo
         FileInfo &cur = list[0][numFiles];
 
-        std::string fileMetaStr;
-        bool fileMetaExist = getValueInTX(tx, fileKey, fileMetaStr);
-        if (fileMetaExist == false)
-        {
-            LOG(ERROR) << "FDBMetaStore::getFileList() failed to get metadata for file " << cur.name;
-            continue;
-        }
         nlohmann::json *fmjPtr = new nlohmann::json();
         auto &fmj = *fmjPtr;
         if (parseStrToJSONObj(fileMetaStr, fmj) == false)
@@ -1384,7 +1368,7 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    // DLOG(INFO) << "FDBMetaStore::getFileList() finished";
+    DLOG(INFO) << "FDBMetaStore::getFileList() finished";
 
     return numFiles;
 }
@@ -1411,7 +1395,7 @@ unsigned int FDBMetaStore::getFolderList(std::vector<std::string> &list, unsigne
     if (dirListExist == false)
     {
         LOG(INFO) << "FDBMetaStore::getFolderList() directory list not exist";
-        
+
         // commit transaction
         FDBFuture *cmt = fdb_transaction_commit(tx);
         exitOnError(fdb_future_block_until_ready(cmt));
@@ -1510,7 +1494,7 @@ unsigned long int FDBMetaStore::getNumFilesToRepair()
         FDBFuture *cmt = fdb_transaction_commit(tx);
         exitOnError(fdb_future_block_until_ready(cmt));
         fdb_future_destroy(cmt);
-        
+
         return 0;
     }
 
@@ -1547,8 +1531,8 @@ int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
         // commit transaction
         FDBFuture *cmt = fdb_transaction_commit(tx);
         exitOnError(fdb_future_block_until_ready(cmt));
-        fdb_future_destroy(cmt);        
-        
+        fdb_future_destroy(cmt);
+
         return 0;
     }
 
@@ -1657,7 +1641,7 @@ bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool s
         }
     }
 
-    bool found = (std::find(lj["list"].begin(), lj["list"].end(), std::string(verFileKey, verFileKeyLength)) != lj["list"].end()); 
+    bool found = (std::find(lj["list"].begin(), lj["list"].end(), std::string(verFileKey, verFileKeyLength)) != lj["list"].end());
 
     if (set == false)
     {
@@ -2198,12 +2182,12 @@ void FDBMetaStore::exitOnError(fdb_error_t err)
     }
 }
 
-void *FDBMetaStore::runNetwork(void *args)
+void *FDBMetaStore::runNetworkThread(void *args)
 {
     fdb_error_t err = fdb_run_network();
     if (err)
     {
-        LOG(ERROR) << "FDBMetaStore::runNetwork fdb_run_network() error";
+        LOG(ERROR) << "FDBMetaStore::runNetworkThread fdb_run_network() error";
         exit(1);
     }
 
@@ -2215,58 +2199,6 @@ FDBDatabase *FDBMetaStore::getDatabase(std::string clusterFile)
     FDBDatabase *db;
     exitOnError(fdb_create_database(clusterFile.c_str(), &db));
     return db;
-}
-
-std::pair<bool, std::string> FDBMetaStore::getValue(std::string key)
-{
-    // create transaction
-    FDBTransaction *tx;
-    exitOnError(fdb_database_create_transaction(_db, &tx));
-    FDBFuture *fget = fdb_transaction_get(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), 0); // not set snapshot
-    exitOnError(fdb_future_block_until_ready(fget));
-    // create future
-    fdb_bool_t key_present;
-    const uint8_t *value = NULL;
-    int value_length;
-    exitOnError(fdb_future_get_value(fget, &key_present, &value, &value_length));
-    fdb_future_destroy(fget);
-
-    bool is_found = false;
-    std::string ret_val;
-    // DEBUG
-    if (key_present)
-    {
-        is_found = true;
-        ret_val = reinterpret_cast<const char *>(value);
-        LOG(INFO)
-            << "FDBMetaStore:: getValue(); key: " << key << ", value: " << ret_val;
-    }
-    else
-    {
-        LOG(INFO) << "FDBMetaStore:: getValue(); key: " << key << ", value not found";
-    }
-
-    // destroy transaction; no need to commit read-only transaction
-    fdb_transaction_destroy(tx);
-
-    return std::pair<bool, std::string>(is_found, ret_val);
-}
-
-void FDBMetaStore::setValueAndCommit(std::string key, std::string value)
-{
-    FDBTransaction *tx;
-    exitOnError(fdb_database_create_transaction(_db, &tx));
-
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(key.c_str()), key.size(), reinterpret_cast<const uint8_t *>(value.c_str()), value.size());
-
-    FDBFuture *fset = fdb_transaction_commit(tx);
-    exitOnError(fdb_future_block_until_ready(fset));
-
-    fdb_future_destroy(fset);
-
-    LOG(INFO) << "FDBMetaStore:: setValue(); key: " << key << ", value: " << value;
-
-    return;
 }
 
 bool FDBMetaStore::getValueInTX(FDBTransaction *tx, const std::string &key, std::string &value)
@@ -2295,8 +2227,7 @@ bool FDBMetaStore::getValueInTX(FDBTransaction *tx, const std::string &key, std:
     {
         // parse result as string
         value = std::string(reinterpret_cast<const char *>(valueRaw), valueRawLength);
-        // LOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found: value " << value;
-        // DLOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found, value has size: " << value.size();
+        // LOG(INFO) << "FDBMetaStore::getValueInTX() key " << key << " found: value (size : " << value.size() << ") " << value;
         return true;
     }
     else
@@ -2304,6 +2235,62 @@ bool FDBMetaStore::getValueInTX(FDBTransaction *tx, const std::string &key, std:
         // DLOG(INFO) << "FDBMetaStore:: getValueInTX() key " << key << " not found";
         return false;
     }
+}
+
+bool FDBMetaStore::getKVPairsWithKeyPrefixInTX(FDBTransaction *tx, const std::string &prefix, std::vector<std::pair<std::string, std::string>> &kvs)
+{
+    if (tx == NULL)
+    {
+        LOG(ERROR) << "FDBMetaStore:: getValueInTX() invalid Transaction";
+        return false;
+    }
+    kvs.clear();
+
+    // prefix end size
+    size_t prefixSize = prefix.size();
+    unsigned char *prefixEnd = (unsigned char *)malloc(prefixSize * sizeof(unsigned char));
+    strncpy(reinterpret_cast<char *>(prefixEnd), prefix.c_str(), prefixSize);
+    prefixEnd[prefixSize - 1]++;
+
+    const FDBKeyValue *kvArray = nullptr;
+    int totalKVCount = 0;
+    int curKVCount = 0;
+    fdb_bool_t outMore = 1;
+    int iteration = 0;
+
+    FDBFuture *kvRangeFut = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefix.c_str()), prefixSize), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixEnd), prefixEnd), 0, 0, FDB_STREAMING_MODE_WANT_ALL, ++iteration, 0 /* No snapshot*/, 0);
+
+    while (outMore)
+    {
+        exitOnError(fdb_future_block_until_ready(kvRangeFut));
+
+        exitOnError(fdb_future_get_keyvalue_array(kvRangeFut, &kvArray, &curKVCount, &outMore));
+
+        // process the results
+        for (int i = 0; i < curKVCount; i++)
+        {
+            std::string key(reinterpret_cast<const char *>(kvArray[i].key), kvArray[i].key_length);
+            std::string value(reinterpret_cast<const char *>(kvArray[i].value), kvArray[i].value_length);
+            kvs.push_back(std::make_pair(key, value));
+        }
+
+        totalKVCount += curKVCount;
+
+        if (outMore)
+        {
+            FDBFuture *kvRangeFutNext = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_THAN(outKv[curKVCount - 1].key, outKv[curKVCount - 1].key_length), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixEnd), prefixEnd), 0, 0, FDB_STREAMING_MODE_WANT_ALL, ++iteration, 0 /* No snapshot*/, 0);
+            fdb_future_destroy(kvRangeFut);
+            kvRangeFut = kvRangeFutNext;
+        }
+    }
+    fdb_future_destroy(kvRangeFut);
+    kvRangeFut = nullptr;
+
+    DLOG(INFO) << "FDBMetaStore:: getKVPairsWithKeyPrefixInTX() prefix: " << prefix << " total KV pairs found: " << totalKVCount << " in " << iteration << " iterations";
+
+    free(prefixEnd);
+
+    return true;
 }
 
 bool FDBMetaStore::parseStrToJSONObj(const std::string &str, nlohmann::json &j)
