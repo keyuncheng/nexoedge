@@ -186,14 +186,26 @@ private:
 
     // FDB operations
     void exitOnError(fdb_error_t err);
-    static void *runNetwork(void *args);
+
+    /**
+     * @brief FDB Network Thread
+     *
+     * @param args
+     * @return void*
+     */
+    static void *runNetworkThread(void *args);
+
+    /**
+     * @brief Get FDB Database
+     *
+     * @param clusterFile cluster file path
+     * @return FDBDatabase*
+     */
     FDBDatabase *getDatabase(std::string clusterFile);
-    std::pair<bool, std::string> getValue(std::string key);
-    void setValueAndCommit(std::string key, std::string value);
     // FDB operations in Transaction
 
     /**
-     * @brief Get value from FDB within the Transaction Context
+     * @brief Get value from FDB in the FDB Transaction
      *
      * @param tx transaction
      * @param key key
@@ -203,7 +215,18 @@ private:
     bool getValueInTX(FDBTransaction *tx, const std::string &key, std::string &value);
 
     /**
-     * @brief parse raw string to JSON object
+     * @brief Get all KV pairs with the key prefix in the FDB Transaction
+     *
+     * @param tx
+     * @param prefix
+     * @param kvs
+     * @return true
+     * @return false
+     */
+    bool getKVPairsWithKeyPrefixInTX(FDBTransaction *tx, const std::string &prefix, std::vector<std::pair<std::string, std::string>> &kvs);
+
+    /**
+     * @brief Parse FDB-returned serialized JSON string to JSON object
      *
      * @param str
      * @param j
