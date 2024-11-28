@@ -14,21 +14,22 @@
 #include "../../common/checksum_calculator.hh"
 
 // change defs's prefix to FDB_
-#define FDB_NUM_RESERVED_SYSTEM_KEYS (9)
-#define FDB_FILE_LOCK_KEY "//snccFLock"
-#define FDB_FILE_PIN_STAGED_KEY "//snccFPinStaged"
-#define FDB_FILE_REPAIR_KEY "//snccFRepair"
-#define FDB_FILE_PENDING_WRITE_KEY "//snccFPendingWrite"
-#define FDB_FILE_PENDING_WRITE_COMP_KEY "//snccFPendingWriteComp"
-#define FDB_BG_TASK_PENDING_KEY "//snccFBgTask"
-#define FDB_DIR_LIST_KEY "//snccDirList"
-#define FDB_JL_LIST_KEY "//snccJournalFSet"
-// new keys
+#define FDB_FILE_PREFIX "//pf_"
+#define FDB_FILE_LOCK_KEY_PREFIX "//snccFLock_"
+#define FDB_FILE_PIN_STAGED_KEY_PREFIX "//snccFPinStaged_"
+#define FDB_FILE_REPAIR_KEY_PREFIX "//snccFRepair_"
+#define FDB_FILE_PENDING_WRITE_KEY_PREFIX "//snccFPendingWrite_"
+#define FDB_FILE_PENDING_WRITE_COMP_KEY_PREFIX "//snccFPendingWriteComp_"
+#define FDB_BG_TASK_PENDING_KEY_PREFIX "//snccFBgTask_"
+#define FDB_DIR_LIST_KEY_PREFIX "//snccDirList_"
+#define FDB_JL_LIST_KEY_PREFIX "//snccJournalFSet_"
+
+// FDB system keys
+#define FDB_NUM_RESERVED_SYSTEM_KEYS (1)
 #define FDB_NUM_FILES_KEY "//snccFileNum"
 
 #define FDB_MAX_KEY_SIZE (64)
 #define FDB_NUM_REQ_FIELDS (10)
-#define FDB_FILE_PREFIX "//pf_"
 
 static std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char *field, size_t fieldLength);
 
@@ -36,15 +37,12 @@ FDBMetaStore::FDBMetaStore()
 {
     Config &config = Config::getInstance();
 
-    LOG(INFO) << "FDBMetaStore::FDBMetaStore() MetaStoreType: " << config.getProxyMetaStoreType();
-
     // select API version
     fdb_select_api_version(FDB_API_VERSION);
-    LOG(INFO) << "FDBMetaStore::FDBMetaStore() creating FDB Client connection, selected API version: " << FDB_API_VERSION;
 
     // init network
     exitOnError(fdb_setup_network());
-    if (pthread_create(&_fdb_network_thread, NULL, FDBMetaStore::runNetworkThread, NULL))
+    if (pthread_create(&_fdb_network_thread, NULL, FDBMetaStore::runNetworkThread, NULL) != 0)
     {
         LOG(ERROR) << "FDBMetaStore::FDBMetaStore() failed to create network thread";
         exit(1);
@@ -56,7 +54,7 @@ FDBMetaStore::FDBMetaStore()
     _taskScanIt = "0";
     _endOfPendingWriteSet = true;
 
-    LOG(INFO) << "FDBMetaStore::FDBMetaStore() MetaStore initialized, clusterFile: " << _FDBClusterFile;
+    LOG(INFO) << "FDBMetaStore::FDBMetaStore() initialized, API version: " << FDB_API_VERSION << ", clusterFile: " << _FDBClusterFile;
 }
 
 FDBMetaStore::~FDBMetaStore()
@@ -2281,7 +2279,6 @@ bool FDBMetaStore::getKVPairsWithKeyPrefixInTX(FDBTransaction *tx, const std::st
             std::string key(reinterpret_cast<const char *>(kvArray[i].key), kvArray[i].key_length);
             std::string value(reinterpret_cast<const char *>(kvArray[i].value), kvArray[i].value_length);
             kvs.push_back(std::make_pair(key, value));
-
         }
 
         totalKVCount += curKVCount;
