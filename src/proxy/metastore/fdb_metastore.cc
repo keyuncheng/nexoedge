@@ -324,16 +324,21 @@ bool FDBMetaStore::putMeta(const File &f)
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(dljStr.c_str()), dljStr.size());
 
     // add file number count
-    std::string numFilesStr;
-    bool numFilesExist = getValueInTX(tx, std::string(FDB_NUM_FILES_KEY), numFilesStr);
-    if (numFilesExist == false)
-    {
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>("1"), 1);
-    }
-    else
-    {
-        int numFiles = std::stoi(numFilesStr);
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>(std::to_string(numFiles + 1).c_str()), std::to_string(numFiles + 1).size());
+    if (fileMetaExist == false)
+    { // it's a new file
+        std::string numFilesStr;
+        bool numFilesExist = getValueInTX(tx, std::string(FDB_NUM_FILES_KEY), numFilesStr);
+        if (numFilesExist == false)
+        {
+            fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>("1"), 1);
+            LOG(INFO) << "called 1st time";
+        }
+        else
+        {
+            int numFiles = std::stoi(numFilesStr);
+            fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>(std::to_string(numFiles + 1).c_str()), std::to_string(numFiles + 1).size());
+            LOG(INFO) << "called " << numFiles + 1 << " time";
+        }
     }
 
     // commit transaction
@@ -789,14 +794,17 @@ bool FDBMetaStore::deleteMeta(File &f)
     }
 
     // update file count
-    std::string numFilesStr;
-    bool numFilesExist = getValueInTX(tx, std::string(FDB_NUM_FILES_KEY), numFilesStr);
-    if (numFilesExist == false)
+    if (removeFileMeta == true)
     {
-        LOG(ERROR) << "FDBMetaStore::deleteMeta() Error finding file count";
-        exit(1);
+        std::string numFilesStr;
+        bool numFilesExist = getValueInTX(tx, std::string(FDB_NUM_FILES_KEY), numFilesStr);
+        if (numFilesExist == false)
+        {
+            LOG(ERROR) << "FDBMetaStore::deleteMeta() Error finding file count";
+            exit(1);
+        }
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>(std::to_string(std::stoi(numFilesStr) - 1).c_str()), std::to_string(std::stoi(numFilesStr) - 1).size());
     }
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>(std::to_string(std::stoi(numFilesStr) - 1).c_str()), std::to_string(std::stoi(numFilesStr) - 1).size());
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -1225,7 +1233,7 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
             }
 
             // get all candidate fileKeys
-            for (int i = 0; i < fplj["list"].size(); i++)
+            for (size_t i = 0; i < fplj["list"].size(); i++)
             {
                 std::string fileKey = fplj["list"][i].get<std::string>();
 
@@ -1251,10 +1259,10 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
     // count number of files
     int numFiles = 0;
 
-    for (auto &fileMeta : candidateFileMetas)
+    for (size_t i = 0; i < candidateFileMetas.size(); i++)
     {
-        std::string &fileKey = fileMeta.first;
-        std::string &fileMetaStr = fileMeta.second;
+        std::string &fileKey = candidateFileMetas[i].first;
+        std::string &fileMetaStr = candidateFileMetas[i].second;
 
         if (isSystemKey(fileKey.c_str()))
         {
@@ -1275,6 +1283,7 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
 
         nlohmann::json *fmjPtr = new nlohmann::json();
         auto &fmj = *fmjPtr;
+
         if (parseStrToJSONObj(fileMetaStr, fmj) == false)
         {
             exit(1);
@@ -1307,7 +1316,7 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
             cur.version = vfmj["ver"].get<int>();
             cur.isDeleted = vfmj["dm"].get<int>();
             ChecksumCalculator::unHex(vfmj["md5"].get<std::string>(), cur.md5, MD5_DIGEST_LENGTH);
-            cur.numChunks = vfmj["numChunks"].get<int>();
+            cur.numChunks = vfmj["numC"].get<int>();
             // staged last modified time
             time_t staged_mtime = vfmj["sg_mtime"].get<time_t>();
             if (staged_mtime > cur.mtime)
@@ -1368,7 +1377,7 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    DLOG(INFO) << "FDBMetaStore::getFileList() finished";
+    // DLOG(INFO) << "FDBMetaStore::getFileList() finished";
 
     return numFiles;
 }
@@ -2258,7 +2267,7 @@ bool FDBMetaStore::getKVPairsWithKeyPrefixInTX(FDBTransaction *tx, const std::st
     fdb_bool_t outMore = 1;
     int iteration = 0;
 
-    FDBFuture *kvRangeFut = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefix.c_str()), prefixSize), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixEnd), prefixEnd), 0, 0, FDB_STREAMING_MODE_WANT_ALL, ++iteration, 0 /* No snapshot*/, 0);
+    FDBFuture *kvRangeFut = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefix.c_str()), prefixSize), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixEnd), prefixSize), 0, 0, FDB_STREAMING_MODE_WANT_ALL, ++iteration, 0 /* No snapshot*/, 0);
 
     while (outMore)
     {
@@ -2272,13 +2281,14 @@ bool FDBMetaStore::getKVPairsWithKeyPrefixInTX(FDBTransaction *tx, const std::st
             std::string key(reinterpret_cast<const char *>(kvArray[i].key), kvArray[i].key_length);
             std::string value(reinterpret_cast<const char *>(kvArray[i].value), kvArray[i].value_length);
             kvs.push_back(std::make_pair(key, value));
+
         }
 
         totalKVCount += curKVCount;
 
         if (outMore)
         {
-            FDBFuture *kvRangeFutNext = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_THAN(outKv[curKVCount - 1].key, outKv[curKVCount - 1].key_length), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixEnd), prefixEnd), 0, 0, FDB_STREAMING_MODE_WANT_ALL, ++iteration, 0 /* No snapshot*/, 0);
+            FDBFuture *kvRangeFutNext = fdb_transaction_get_range(tx, FDB_KEYSEL_FIRST_GREATER_THAN(kvArray[curKVCount - 1].key, kvArray[curKVCount - 1].key_length), FDB_KEYSEL_FIRST_GREATER_OR_EQUAL(reinterpret_cast<const uint8_t *>(prefixEnd), prefixSize), 0, 0, FDB_STREAMING_MODE_WANT_ALL, ++iteration, 0 /* No snapshot*/, 0);
             fdb_future_destroy(kvRangeFut);
             kvRangeFut = kvRangeFutNext;
         }
@@ -2286,7 +2296,7 @@ bool FDBMetaStore::getKVPairsWithKeyPrefixInTX(FDBTransaction *tx, const std::st
     fdb_future_destroy(kvRangeFut);
     kvRangeFut = nullptr;
 
-    DLOG(INFO) << "FDBMetaStore:: getKVPairsWithKeyPrefixInTX() prefix: " << prefix << " total KV pairs found: " << totalKVCount << " in " << iteration << " iterations";
+    // DLOG(INFO) << "FDBMetaStore:: getKVPairsWithKeyPrefixInTX() prefix: " << prefix << " total KV pairs found: " << totalKVCount << " in " << iteration << " iterations";
 
     free(prefixEnd);
 
