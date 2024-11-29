@@ -69,9 +69,8 @@ FDBMetaStore::~FDBMetaStore()
 
 bool FDBMetaStore::putMeta(const File &f)
 {
-    double overallTimeSec = 0, parsingTimeSec = 0;
-
     // benchmark time (init)
+    double overallTimeSec = 0, parsingTimeSec = 0;
     boost::timer::cpu_timer overallTimer, parsingTimer;
     boost::timer::nanosecond_type duration;
 
@@ -91,9 +90,8 @@ bool FDBMetaStore::putMeta(const File &f)
     std::string fVerSummary;
     fVerSummary.append(std::to_string(f.size).append(" "));
     fVerSummary.append(std::to_string(f.mtime).append(" "));
-    // convert md5 to string
     std::string fileMd5 = ChecksumCalculator::toHex(f.md5, MD5_DIGEST_LENGTH);
-    // fVerSummary.append(fileMd5.append(" "));
+    fVerSummary.append(fileMd5.append(" "));
     fVerSummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" "));
     fVerSummary.append(std::to_string(f.numChunks));
 
@@ -109,7 +107,7 @@ bool FDBMetaStore::putMeta(const File &f)
     auto &fmj = *fmjPtr;
 
     if (fileMetaExist == false)
-    { // No file meta: init the new version
+    { // no file meta: init the new version
         // version id
         fmj["verId"] = nlohmann::json::array();
         fmj["verId"].push_back(std::to_string(f.version));
@@ -121,8 +119,7 @@ bool FDBMetaStore::putMeta(const File &f)
         fmj["verSummary"].push_back(fVerSummary);
     }
     else
-    { // File meta exists
-
+    { // file meta exists: update
         // benchmark time (start)
         parsingTimer.start();
 
@@ -156,7 +153,7 @@ bool FDBMetaStore::putMeta(const File &f)
         }
         else
         {
-            // if the version is not stored, insert it in ascending order
+            // check whether the version exists
             if (std::find(fmj["verId"].begin(), fmj["verId"].end(), std::string(verFileKey, verFileKeyLength)) == fmj["verId"].end())
             {
                 size_t pos;
@@ -167,6 +164,7 @@ bool FDBMetaStore::putMeta(const File &f)
                         break;
                     }
                 }
+                // insert the version in ascending order
                 fmj["verId"].insert(fmj["verId"].begin() + pos, f.version);
                 fmj["verName"].insert(fmj["verName"].begin() + pos, std::string(verFileKey, verFileKeyLength));
                 fmj["verSummary"].insert(fmj["verSummary"].begin() + pos, fVerSummary);
@@ -177,7 +175,7 @@ bool FDBMetaStore::putMeta(const File &f)
     // benchmark time (start)
     parsingTimer.start();
 
-    // Store file meta into FDB
+    // serialize file metadata to JSON string
     std::string fmjStr = fmj.dump();
 
     // benchmark time (end)
@@ -185,15 +183,10 @@ bool FDBMetaStore::putMeta(const File &f)
     parsingTimeSec += duration / 1e9;
 
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength, reinterpret_cast<const uint8_t *>(fmjStr.c_str()), fmjStr.size());
+
     delete fmjPtr;
 
-    /**
-     * @brief Versioned file metadata format
-     * @Key verFileKey
-     * @Value JSON string
-     *
-     */
-    // Create metadata for the current file version
+    // create metadata for current file version
     bool isEmptyFile = f.size == 0;
     unsigned char *codingState = isEmptyFile || f.codingMeta.codingState == NULL ? (unsigned char *)"" : f.codingMeta.codingState;
     int deleted = isEmptyFile ? f.isDeleted : 0;
@@ -273,15 +266,15 @@ bool FDBMetaStore::putMeta(const File &f)
     // benchmark time (start)
     parsingTimer.start();
 
-    // Store file meta into FDB
+    // serialize file metadata to JSON string
     std::string verFmjStr = verFmj.dump();
 
     // benchmark time (end)
     duration = parsingTimer.elapsed().wall;
     parsingTimeSec += duration / 1e9;
 
-    // Store versioned file meta into FDB
     fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength, reinterpret_cast<const uint8_t *>(verFmjStr.c_str()), verFmjStr.size());
+
     delete verFmjPtr;
 
     // add uuid-to-file-name maping
@@ -296,84 +289,29 @@ bool FDBMetaStore::putMeta(const File &f)
         fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(fUUIDKey), FDB_MAX_KEY_SIZE + 64, reinterpret_cast<const uint8_t *>(f.name), f.nameLength);
     }
 
-    // TODO: modify file prefix set and directory list set
-
-    // add filename to file Prefix Set
+    // file prefix set: add filePrefixKey (filePrefix_filename)
     std::string filePrefix = getFilePrefix(fileKey);
-    std::string fPrefixListStr;
-    bool fPrefixListExist = getValueInTX(tx, filePrefix, fPrefixListStr);
+    std::string filePrefixKey = filePrefix + std::string("_") + std::string(f.name, f.nameLength);
+    // Note: value is not used
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefixKey.c_str()), filePrefixKey.size(), reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength);
 
-    nlohmann::json *fpljPtr = new nlohmann::json();
-    auto &fplj = *fpljPtr;
-    if (fPrefixListExist == false)
-    {
-        // create the set and add the fileKey
-        fplj["list"] = nlohmann::json::array();
-        fplj["list"].push_back(fileKey);
-    }
-    else
-    {
-        // add fileKey to the list (avoid duplication)
-        if (parseStrToJSONObj(fPrefixListStr, fplj) == false)
-        {
-            exit(1);
-        }
-        if (std::find(fplj["list"].begin(), fplj["list"].end(), std::string(fileKey, fileKeyLength)) == fplj["list"].end())
-        {
-            fplj["list"].push_back(std::string(fileKey, fileKeyLength));
-        }
-    }
-    std::string fpljStr = fplj.dump();
-    delete fpljPtr;
+    // directory set: add dirKey (FDB_DIR_LIST_KEY_filePrefix)
+    std::string dirKey = std::string(FDB_DIR_LIST_KEY) + std::string("_") + filePrefix;
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dirKey.c_str()), dirKey.size(), reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size());
 
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefix.c_str()), filePrefix.size(), reinterpret_cast<const uint8_t *>(fpljStr.c_str()), fpljStr.size());
-
-    // Update the directory list
-    std::string dirListStr;
-    bool dirListExist = getValueInTX(tx, std::string(FDB_DIR_LIST_KEY), dirListStr);
-
-    nlohmann::json *dljPtr = new nlohmann::json();
-    auto &dlj = *dljPtr;
-
-    if (dirListExist == false)
-    {
-        // create the list and add file prefix to the list
-        dlj["list"] = nlohmann::json::array();
-        dlj["list"].push_back(filePrefix.c_str());
-    }
-    else
-    {
-        // add filePrefix to the list (avoid duplication)
-        if (parseStrToJSONObj(dirListStr, dlj) == false)
-        {
-            exit(1);
-        }
-        if (std::find(dlj["list"].begin(), dlj["list"].end(), filePrefix) == dlj["list"].end())
-        {
-            dlj["list"].push_back(filePrefix);
-        }
-    }
-
-    std::string dljStr = dlj.dump();
-    delete dljPtr;
-
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_DIR_LIST_KEY), std::string(FDB_DIR_LIST_KEY).size(), reinterpret_cast<const uint8_t *>(dljStr.c_str()), dljStr.size());
-
-    // add file number count
+    // update file count
     if (fileMetaExist == false)
-    { // it's a new file
+    { // creating a new file
         std::string numFilesStr;
         bool numFilesExist = getValueInTX(tx, std::string(FDB_NUM_FILES_KEY), numFilesStr);
         if (numFilesExist == false)
         {
             fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>("1"), 1);
-            LOG(INFO) << "called 1st time";
         }
         else
         {
             int numFiles = std::stoi(numFilesStr);
             fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_NUM_FILES_KEY), std::string(FDB_NUM_FILES_KEY).size(), reinterpret_cast<const uint8_t *>(std::to_string(numFiles + 1).c_str()), std::to_string(numFiles + 1).size());
-            LOG(INFO) << "called " << numFiles + 1 << " time";
         }
     }
 
@@ -388,6 +326,8 @@ bool FDBMetaStore::putMeta(const File &f)
     // benchmark time (end)
     duration = overallTimer.elapsed().wall;
     overallTimeSec += duration / 1e9;
+
+    DLOG(INFO) << "FDBMetaStore::putMeta() finished, overall time(s): " << overallTimeSec << ", parsing time(s): " << parsingTimeSec << ", percentage: " << (parsingTimeSec / overallTimeSec) * 100 << "%";
 
     return true;
 }
