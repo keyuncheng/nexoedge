@@ -1626,103 +1626,103 @@ int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
-    std::string filePendingWriteStr;
-    std::string filePendingWriteCopyKey = std::string(FDB_FILE_PENDING_WRITE_KEY) + std::string("_copy");
-    bool filePendingWriteExist = getValueInTX(tx, filePendingWriteCopyKey, filePendingWriteStr);
+    // std::string filePendingWriteStr;
+    // std::string filePendingWriteCopyKey = std::string(FDB_FILE_PENDING_WRITE_KEY) + std::string("_copy");
+    // bool filePendingWriteExist = getValueInTX(tx, filePendingWriteCopyKey, filePendingWriteStr);
 
-    if (filePendingWriteExist == false)
-    {
-        LOG(WARNING) << "FDBMetaStore::getFilesPendingWriteToCloud() Error finding file pending write list";
+    // if (filePendingWriteExist == false)
+    // {
+    //     LOG(WARNING) << "FDBMetaStore::getFilesPendingWriteToCloud() Error finding file pending write list";
 
-        // commit transaction
-        FDBFuture *cmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(cmt));
-        fdb_future_destroy(cmt);
+    //     // commit transaction
+    //     FDBFuture *cmt = fdb_transaction_commit(tx);
+    //     exitOnError(fdb_future_block_until_ready(cmt));
+    //     fdb_future_destroy(cmt);
 
-        return retVal; // same as Redis-based MetaStore
-    }
+    //     return retVal; // same as Redis-based MetaStore
+    // }
 
-    nlohmann::json *fpwjPtr = new nlohmann::json();
-    auto &fpwj = *fpwjPtr;
-    if (parseStrToJSONObj(filePendingWriteStr, fpwj) == false)
-    {
-        exit(1);
-    }
+    // nlohmann::json *fpwjPtr = new nlohmann::json();
+    // auto &fpwj = *fpwjPtr;
+    // if (parseStrToJSONObj(filePendingWriteStr, fpwj) == false)
+    // {
+    //     exit(1);
+    // }
 
-    int numFilesToRepair = 0;
-    numFilesToRepair = fpwj["list"].size();
+    // int numFilesToRepair = 0;
+    // numFilesToRepair = fpwj["list"].size();
 
-    if (numFilesToRepair == 0 && !_endOfPendingWriteSet)
-    {
-        _endOfPendingWriteSet = true;
+    // if (numFilesToRepair == 0 && !_endOfPendingWriteSet)
+    // {
+    //     _endOfPendingWriteSet = true;
 
-        delete fpwjPtr;
-        // commit transaction
-        FDBFuture *cmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(cmt));
-        fdb_future_destroy(cmt);
-        return retVal;
-    }
+    //     delete fpwjPtr;
+    //     // commit transaction
+    //     FDBFuture *cmt = fdb_transaction_commit(tx);
+    //     exitOnError(fdb_future_block_until_ready(cmt));
+    //     fdb_future_destroy(cmt);
+    //     return retVal;
+    // }
 
-    // refill the set for scan
-    if (numFilesToRepair == 0)
-    {
+    // // refill the set for scan
+    // if (numFilesToRepair == 0)
+    // {
 
-        delete fpwjPtr;
-        // commit transaction
-        FDBFuture *cmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(cmt));
-        fdb_future_destroy(cmt);
-        return retVal;
-    }
+    //     delete fpwjPtr;
+    //     // commit transaction
+    //     FDBFuture *cmt = fdb_transaction_commit(tx);
+    //     exitOnError(fdb_future_block_until_ready(cmt));
+    //     fdb_future_destroy(cmt);
+    //     return retVal;
+    // }
 
-    // mark the set scanning is in-progress
-    _endOfPendingWriteSet = false;
+    // // mark the set scanning is in-progress
+    // _endOfPendingWriteSet = false;
 
-    std::string fileKey = fpwj["list"].back().get<std::string>();
-    fpwj.erase(fpwj["list"].begin() + fpwj["list"].size() - 1);
+    // std::string fileKey = fpwj["list"].back().get<std::string>();
+    // fpwj.erase(fpwj["list"].begin() + fpwj["list"].size() - 1);
 
-    std::string fpwjStr = fpwj.dump();
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePendingWriteCopyKey.c_str()), filePendingWriteCopyKey.size(), reinterpret_cast<const uint8_t *>(fpwjStr.c_str()), fpwjStr.size());
+    // std::string fpwjStr = fpwj.dump();
+    // fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePendingWriteCopyKey.c_str()), filePendingWriteCopyKey.size(), reinterpret_cast<const uint8_t *>(fpwjStr.c_str()), fpwjStr.size());
 
-    delete fpwjPtr;
+    // delete fpwjPtr;
 
-    // add the key to filePendingWriteCompleteKey
-    std::string filePendingWriteCompStr;
-    bool filePendingWriteCompExist = getValueInTX(tx, std::string(FDB_FILE_PENDING_WRITE_COMP_KEY), filePendingWriteCompStr);
+    // // add the key to filePendingWriteCompleteKey
+    // std::string filePendingWriteCompStr;
+    // bool filePendingWriteCompExist = getValueInTX(tx, std::string(FDB_FILE_PENDING_WRITE_COMP_KEY), filePendingWriteCompStr);
 
-    nlohmann::json *fpwcPtr = new nlohmann::json();
-    auto &fpwc = *fpwcPtr;
+    // nlohmann::json *fpwcPtr = new nlohmann::json();
+    // auto &fpwc = *fpwcPtr;
 
-    if (filePendingWriteCompExist == false)
-    {
-        fpwc["list"] = nlohmann::json::array();
-    }
-    else
-    {
-        if (parseStrToJSONObj(filePendingWriteCompStr, fpwc) == false)
-        {
-            exit(1);
-        }
-    }
+    // if (filePendingWriteCompExist == false)
+    // {
+    //     fpwc["list"] = nlohmann::json::array();
+    // }
+    // else
+    // {
+    //     if (parseStrToJSONObj(filePendingWriteCompStr, fpwc) == false)
+    //     {
+    //         exit(1);
+    //     }
+    // }
 
-    bool addToList = false;
+    // bool addToList = false;
 
-    if (std::find(fpwc["list"].begin(), fpwc["list"].end(), fileKey) == fpwc["list"].end())
-    {
-        fpwc["list"].push_back(fileKey);
-        addToList = true;
-    }
+    // if (std::find(fpwc["list"].begin(), fpwc["list"].end(), fileKey) == fpwc["list"].end())
+    // {
+    //     fpwc["list"].push_back(fileKey);
+    //     addToList = true;
+    // }
 
-    if (addToList && getNameFromFileKey(fileKey.data(), fileKey.length(), &files[0].name, files[0].nameLength, files[0].namespaceId, &files[0].version))
-    {
-        retVal = 1;
-    }
+    // if (addToList && getNameFromFileKey(fileKey.data(), fileKey.length(), &files[0].name, files[0].nameLength, files[0].namespaceId, &files[0].version))
+    // {
+    //     retVal = 1;
+    // }
 
-    delete fpwcPtr;
+    // delete fpwcPtr;
 
-    std::string fpwcStr = fpwc.dump();
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_FILE_PENDING_WRITE_COMP_KEY), strlen(FDB_FILE_PENDING_WRITE_COMP_KEY), reinterpret_cast<const uint8_t *>(fpwcStr.c_str()), fpwcStr.size());
+    // std::string fpwcStr = fpwc.dump();
+    // fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_FILE_PENDING_WRITE_COMP_KEY), strlen(FDB_FILE_PENDING_WRITE_COMP_KEY), reinterpret_cast<const uint8_t *>(fpwcStr.c_str()), fpwcStr.size());
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -1771,50 +1771,48 @@ bool FDBMetaStore::getNextFileForTaskCheck(File &file)
 {
     std::lock_guard<std::mutex> lk(_lock);
 
+    bool retVal = false;
+
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
-    std::string bgTaskPendingStr;
-    bool bgTaskPendingExist = getValueInTX(tx, std::string(FDB_BG_TASK_PENDING_KEY), bgTaskPendingStr);
-
-    if (bgTaskPendingExist == false)
+    std::string taskCheckKey = std::string(FDB_BG_TASK_PENDING_KEY_PREFIX) + std::string("_");
+    std::vector<std::pair<std::string, std::string>> fileKeys;
+    if (getKVPairsWithKeyPrefixInTX(tx, taskCheckKey, fileKeys) == 0)
     {
-        // commit transaction
-        FDBFuture *cmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(cmt));
-        fdb_future_destroy(cmt);
+        LOG(ERROR) << "FDBMetaStore::getNextFileForTaskCheck() Error getting file keys from " << FDB_BG_TASK_PENDING_KEY_PREFIX;
 
-        return false; // same as Redis-based MetaStore
-    }
-
-    nlohmann::json *btpjPtr = new nlohmann::json();
-    auto &btpj = *btpjPtr;
-    if (parseStrToJSONObj(bgTaskPendingStr, btpj) == false)
-    {
         exit(1);
     }
 
-    std::string fileKey = btpj["list"].back().get<std::string>();
-    const char *d = strchr(fileKey.c_str(), '_');
-    if (d != nullptr)
-    {
-        file.nameLength = fileKey.size() - (d - fileKey.c_str() + 1);
-        file.name = (char *)malloc(file.nameLength + 1);
-        memcpy(file.name, d + 1, file.nameLength);
-        file.name[file.nameLength] = '\0';
-        file.namespaceId = atoi(fileKey.c_str());
-        DLOG(INFO) << "Next file to check: " << file.name << ", " << (int)file.namespaceId;
-    }
+    if (fileKeys.size() > 0)
+    { // retrieve the first key (in lexigraphically sorted order)
+        std::string tcKey = fileKeys[0].first;
+        std::string fileKey = fileKeys[0].second;
 
-    delete btpjPtr;
+        const char *d = strchr(fileKey.c_str(), '_');
+        if (d != nullptr)
+        {
+            file.nameLength = fileKey.size() - (d - fileKey.c_str() + 1);
+            file.name = (char *)malloc(file.nameLength + 1);
+            memcpy(file.name, d + 1, file.nameLength);
+            file.name[file.nameLength] = '\0';
+            file.namespaceId = atoi(fileKey.c_str());
+            DLOG(INFO) << "FDBMetaStore::getNextFileForTaskCheck() Next file to check: " << file.name << ", " << (int)file.namespaceId;
+        }
+
+        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(tcKey.c_str()), tcKey.size());
+
+        retVal = true;
+    }
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    return true;
+    return retVal;
 }
 
 bool FDBMetaStore::lockFile(const File &file)
@@ -2042,66 +2040,29 @@ bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const
     char fileKey[PATH_MAX];
     int fileKeyLength = genFileKey(file.namespaceId, file.name, file.nameLength, fileKey);
 
-    std::string lockListName(type);
+    bool retVal = false;
 
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
     // add filename to file Prefix Set
-    std::string lockListStr;
-    bool lockListExist = getValueInTX(tx, lockListName, lockListStr);
+    std::string lockName(type);
+    std::string lockKey = lockName + std::string("_") + std::string(fileKey, fileKeyLength);
+    std::string lockStr;
+    bool lockExist = getValueInTX(tx, lockKey, lockStr);
 
-    // unlock but lock list not exist
-    if (lock == false && lockListExist == false)
-    {
-        // commit transaction and return
-        FDBFuture *cmt = fdb_transaction_commit(tx);
-        exitOnError(fdb_future_block_until_ready(cmt));
-        fdb_future_destroy(cmt);
-
-        return false;
-    }
-
-    bool retVal = false;
-    nlohmann::json *lljPtr = new nlohmann::json();
-    auto &llj = *lljPtr;
-    if (lockListExist == false)
-    {
-        // create the set and add the fileKey
-        llj["list"] = nlohmann::json::array();
-        llj["list"].push_back(std::string(fileKey, fileKeyLength));
+    if (lockExist == false && lock == true)
+    { // add the fileKey
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(lockKey.c_str()), lockKey.size(), reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength);
         retVal = true;
     }
-    else
-    {
-        if (parseStrToJSONObj(lockListStr, llj) == false)
-        {
-            exit(1);
-        }
+    else if (lockExist == true && lock == false)
+    { // remove the fileKey
+        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(lockKey.c_str()), lockKey.size());
 
-        bool lockExist = (std::find(llj["list"].begin(), llj["list"].end(), std::string(fileKey, fileKeyLength)) != llj["list"].end());
-
-        if (lock == true)
-        { // lock
-            if (lockExist == false)
-            {
-                llj["list"].push_back(std::string(fileKey, fileKeyLength));
-                retVal = true;
-            }
-        }
-        else
-        { // unlock
-            if (lockExist == true)
-            {
-                llj["list"].erase(std::remove(llj["list"].begin(), llj["list"].end(), std::string(fileKey, fileKeyLength)), llj["list"].end());
-                retVal = true;
-            }
-        }
+        retVal = true;
     }
-    std::string lljStr = llj.dump();
-    delete lljPtr;
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(lockListName.c_str()), lockListName.size(), reinterpret_cast<const uint8_t *>(lljStr.c_str()), lljStr.size());
 
     // commit transaction and return
     FDBFuture *cmt = fdb_transaction_commit(tx);
