@@ -1726,29 +1726,43 @@ int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
 
 bool FDBMetaStore::updateFileStatus(const File &file)
 {
-    // TODO: this implementation is not checked correctness for now
     std::lock_guard<std::mutex> lk(_lock);
     char fileKey[PATH_MAX];
     int fileKeyLength = genFileKey(file.namespaceId, file.name, file.nameLength, fileKey);
-    bool ret = false;
-
-    DLOG(INFO) << fileKeyLength;
 
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
+    std::string bgTaskKey = std::string(FDB_BG_TASK_PENDING_KEY_PREFIX) + std::string("_") + std::string(fileKey, fileKeyLength);
+    std::string bgTaskCountStr;
+    bool bgTaskCountExist = getValueInTX(tx, bgTaskKey, bgTaskCountStr);
+    int bgTaskCount = 0;
+    if (bgTaskCountExist == true) {
+        bgTaskCount = std::stoi(bgTaskCountStr);
+    }
+
     if (file.status == FileStatus::PART_BG_TASK_COMPLETED)
     {
-        // decrement number of task by 1, and remove the file is the number of pending task drops to 0
+        // decrement number of task by 1, and remove the file is the number of
+        // pending task drops to 0
+        bgTaskCount--;
+        if (bgTaskCount > 0) {
+            fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size(), reinterpret_cast<const uint8_t *>(std::to_string(bgTaskCount).c_str()), std::to_string(bgTaskCount).size());
+        } else {
+            fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size());
+        }
     }
     else if (file.status == FileStatus::BG_TASK_PENDING)
-    {
-        // increment number of task by 1
+    { // increment number of task by 1
+        bgTaskCount++;
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size(), reinterpret_cast<const uint8_t *>(std::to_string(bgTaskCount).c_str()), std::to_string(bgTaskCount).size());
+        DLOG(INFO) << "File (task pending) " << file.name << " status updated bg task, count: " << bgTaskCount;
     }
     else if (file.status == FileStatus::ALL_BG_TASKS_COMPLETED)
-    {
-        // remove the file from the list
+    { // remove the file from the list
+        fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size());
+        DLOG(INFO) << "File (all tasks completed) " << file.name << " status updated";
     }
 
     // commit transaction
