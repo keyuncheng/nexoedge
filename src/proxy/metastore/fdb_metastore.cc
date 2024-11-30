@@ -1608,120 +1608,91 @@ bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool s
 
 int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
 {
-    // TODO: this implementation is not checked correctness for now
-
     std::lock_guard<std::mutex> lk(_lock);
 
-    int retVal = 0;
+    int num = 0;
 
     // create transaction
     FDBTransaction *tx;
     exitOnError(fdb_database_create_transaction(_db, &tx));
 
-    // std::string filePendingWriteStr;
-    // std::string filePendingWriteCopyKey = std::string(FDB_FILE_PENDING_WRITE_KEY) + std::string("_copy");
-    // bool filePendingWriteExist = getValueInTX(tx, filePendingWriteCopyKey, filePendingWriteStr);
+    // obtain fileKeys in the snapshot
+    std::string filePendingWriteCopyKey = std::string(FDB_FILE_PENDING_WRITE_KEY_PREFIX) + std::string("_copy") + std::string("_");
+    std::vector<std::pair<std::string, std::string>> snapshotFileKeys;
+    if (getKVPairsWithKeyPrefixInTX(tx, filePendingWriteCopyKey, snapshotFileKeys) == 0)
+    {
+        exit(1);
+    }
 
-    // if (filePendingWriteExist == false)
-    // {
-    //     LOG(WARNING) << "FDBMetaStore::getFilesPendingWriteToCloud() Error finding file pending write list";
+    bool snapshotEmpty = snapshotFileKeys.size() == 0;
 
-    //     // commit transaction
-    //     FDBFuture *cmt = fdb_transaction_commit(tx);
-    //     exitOnError(fdb_future_block_until_ready(cmt));
-    //     fdb_future_destroy(cmt);
+    // mark end of set iteration
+    if (snapshotEmpty && !_endOfPendingWriteSet)
+    {
+        _endOfPendingWriteSet = true;
 
-    //     return retVal; // same as Redis-based MetaStore
-    // }
+        // commit transaction
+        FDBFuture *cmt = fdb_transaction_commit(tx);
+        exitOnError(fdb_future_block_until_ready(cmt));
+        fdb_future_destroy(cmt);
 
-    // nlohmann::json *fpwjPtr = new nlohmann::json();
-    // auto &fpwj = *fpwjPtr;
-    // if (parseStrToJSONObj(filePendingWriteStr, fpwj) == false)
-    // {
-    //     exit(1);
-    // }
+        return num;
+    }
 
-    // int numFilesToRepair = 0;
-    // numFilesToRepair = fpwj["list"].size();
+    // refill the set for scan
+    if (snapshotEmpty)
+    {
+        // NOTE: ignored "*_not_exists" in Redis-based MetaStore for now
+        std::string filePendingWriteKey = std::string(FDB_FILE_PENDING_WRITE_KEY_PREFIX) + std::string("_");
+        std::vector<std : pair<std::string, std::string>> fileKeys;
+        if (getKVpairsWithKeyPrefixInTX(tx, filePendingWriteKey, fileKeys) == 0)
+        {
+            exit(1);
+        }
+        // copy the files to snapshot
+        for (int i = 0; i < fileKeys.size(); i++)
+        {
+            std::string &fileKey = fileKeys[i].second;
+            std::string listKey = filePendingWriteCopyKey + fileKey;
+            fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(listKey.c_str()), listKey.size(), reinterpret_cast<const uint8_t *>(fileKey.c_str()), fileKey.size());
+            snapshotFileKeys.push_back(std::make_pair(listKey, fileKey));
+        }
 
-    // if (numFilesToRepair == 0 && !_endOfPendingWriteSet)
-    // {
-    //     _endOfPendingWriteSet = true;
+        // if no file is pending, skip checking
+        if (fileKeys.empty())
+        {
+            // commit transaction
+            FDBFuture *cmt = fdb_transaction_commit(tx);
+            exitOnError(fdb_future_block_until_ready(cmt));
+            fdb_future_destroy(cmt);
 
-    //     delete fpwjPtr;
-    //     // commit transaction
-    //     FDBFuture *cmt = fdb_transaction_commit(tx);
-    //     exitOnError(fdb_future_block_until_ready(cmt));
-    //     fdb_future_destroy(cmt);
-    //     return retVal;
-    // }
+            return num;
+        }
+    }
 
-    // // refill the set for scan
-    // if (numFilesToRepair == 0)
-    // {
+    // mark the set scanning is in-progress
+    _endOfPendingWriteSet = false;
 
-    //     delete fpwjPtr;
-    //     // commit transaction
-    //     FDBFuture *cmt = fdb_transaction_commit(tx);
-    //     exitOnError(fdb_future_block_until_ready(cmt));
-    //     fdb_future_destroy(cmt);
-    //     return retVal;
-    // }
+    // mark the last file as pending to complete for write
+    std::string selectedSnapshotKey = snapshotFileKeys.back().first;
+    std::string selectedFileKey = snapshotFileKeys.back().second;
+    std::string filePendingWriteCompKey = std::string(FDB_FILE_PENDING_WRITE_COMP_KEY_PREFIX) + std::string("_") + selectedFileKey;
+    // remove the snapshotKey
+    fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(selectedSnapshotKey.c_str()), selectedSnapshotKey.size());
+    // add the FilePendingWriteCompKey
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePendingWriteCompKey.c_str()), filePendingWriteCompKey.size(), reinterpret_cast<const uint8_t *>(selectedFileKey.c_str()), selectedFileKey.size());
 
-    // // mark the set scanning is in-progress
-    // _endOfPendingWriteSet = false;
-
-    // std::string fileKey = fpwj["list"].back().get<std::string>();
-    // fpwj.erase(fpwj["list"].begin() + fpwj["list"].size() - 1);
-
-    // std::string fpwjStr = fpwj.dump();
-    // fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePendingWriteCopyKey.c_str()), filePendingWriteCopyKey.size(), reinterpret_cast<const uint8_t *>(fpwjStr.c_str()), fpwjStr.size());
-
-    // delete fpwjPtr;
-
-    // // add the key to filePendingWriteCompleteKey
-    // std::string filePendingWriteCompStr;
-    // bool filePendingWriteCompExist = getValueInTX(tx, std::string(FDB_FILE_PENDING_WRITE_COMP_KEY), filePendingWriteCompStr);
-
-    // nlohmann::json *fpwcPtr = new nlohmann::json();
-    // auto &fpwc = *fpwcPtr;
-
-    // if (filePendingWriteCompExist == false)
-    // {
-    //     fpwc["list"] = nlohmann::json::array();
-    // }
-    // else
-    // {
-    //     if (parseStrToJSONObj(filePendingWriteCompStr, fpwc) == false)
-    //     {
-    //         exit(1);
-    //     }
-    // }
-
-    // bool addToList = false;
-
-    // if (std::find(fpwc["list"].begin(), fpwc["list"].end(), fileKey) == fpwc["list"].end())
-    // {
-    //     fpwc["list"].push_back(fileKey);
-    //     addToList = true;
-    // }
-
-    // if (addToList && getNameFromFileKey(fileKey.data(), fileKey.length(), &files[0].name, files[0].nameLength, files[0].namespaceId, &files[0].version))
-    // {
-    //     retVal = 1;
-    // }
-
-    // delete fpwcPtr;
-
-    // std::string fpwcStr = fpwc.dump();
-    // fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(FDB_FILE_PENDING_WRITE_COMP_KEY), strlen(FDB_FILE_PENDING_WRITE_COMP_KEY), reinterpret_cast<const uint8_t *>(fpwcStr.c_str()), fpwcStr.size());
+    if (getNameFromFileKey(selectedFileKey.data(), selectedFileKey.length(), &files[0].name, files[0].nameLength, files[0].namespaceId, &files[0].version))
+    {
+        num++;
+    }
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    return retVal;
+    return num;
 }
 
 bool FDBMetaStore::updateFileStatus(const File &file)
@@ -1738,25 +1709,30 @@ bool FDBMetaStore::updateFileStatus(const File &file)
     std::string bgTaskCountStr;
     bool bgTaskCountExist = getValueInTX(tx, bgTaskKey, bgTaskCountStr);
     int bgTaskCount = 0;
-    if (bgTaskCountExist == true) {
+    if (bgTaskCountExist == true)
+    {
         bgTaskCount = std::stoi(bgTaskCountStr);
     }
 
     if (file.status == FileStatus::PART_BG_TASK_COMPLETED)
-    {
-        // decrement number of task by 1, and remove the file is the number of
+    { // decrement number of task by 1, and remove the file is the number of
         // pending task drops to 0
         bgTaskCount--;
-        if (bgTaskCount > 0) {
-            fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size(), reinterpret_cast<const uint8_t *>(std::to_string(bgTaskCount).c_str()), std::to_string(bgTaskCount).size());
-        } else {
+        bgTaskCountStr = std::to_string(bgTaskCount);
+        if (bgTaskCount > 0)
+        {
+            fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size(), reinterpret_cast<const uint8_t *>(bgTaskCountStr.c_str()), bgTaskCountStr.size());
+        }
+        else
+        {
             fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size());
         }
     }
     else if (file.status == FileStatus::BG_TASK_PENDING)
     { // increment number of task by 1
         bgTaskCount++;
-        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size(), reinterpret_cast<const uint8_t *>(std::to_string(bgTaskCount).c_str()), std::to_string(bgTaskCount).size());
+        bgTaskCountStr = std::to_string(bgTaskCount);
+        fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(bgTaskKey.c_str()), bgTaskKey.size(), reinterpret_cast<const uint8_t *>(bgTaskCountStr.c_str()), bgTaskCountStr.size());
         DLOG(INFO) << "File (task pending) " << file.name << " status updated bg task, count: " << bgTaskCount;
     }
     else if (file.status == FileStatus::ALL_BG_TASKS_COMPLETED)
