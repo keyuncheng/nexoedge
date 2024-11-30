@@ -12,8 +12,7 @@
 #include "../../proxy/metastore/redis_metastore.hh"
 #include "../../proxy/metastore/fdb_metastore.hh"
 
-// static const size_t numFilesToTest = 1024;
-static const size_t numFilesToTest = 100;
+static const size_t numFilesToTest = 1024;
 static const int maxFileNameLength = 1024;
 static const unsigned long maxFileSize = (unsigned long) (1 << 30) * 4; // 4GB
 static int chunkSize = (1 << 20); // 1MB
@@ -41,6 +40,7 @@ static void preUpdateTimestamps();
 static void readAndCheckFileMeta();
 static void checkLock();
 static void checkUnlock();
+static void checkList(MetaStore *);
 static void checkRename(const size_t);
 
 void metaWrite(MetaStore *);
@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
     metaLock(metastore);
     duration = mytimer.elapsed().wall;
     checkLock();
-    printf("> Test %d compeltes: Lock %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
+    printf("> Test %d completed: Lock %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
     // test 4: file unlock
     mytimer.start();
@@ -137,10 +137,12 @@ int main(int argc, char **argv) {
     checkUnlock();
     printf("> Test %d completed: Unlock %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(numFilesToTest, duration));
 
-    // // test 5: file listing
-    // mytimer.start();
-    // metaList(metastore);
-    // printf("> Test %d completed: List %lu files in %.6lf seconds\n", ++testCount, numFilesToTest, nanoSecToSec(mytimer.elapsed().wall));
+    // test 5: file listing
+    mytimer.start();
+    metaList(metastore);
+    duration = mytimer.elapsed().wall;
+    checkList(metastore);
+    printf("> Test %d completed: List %lu files in %.6lf seconds (%.3lf op/s)\n", ++testCount, numFilesToTest, nanoSecToSec(duration), getThp(1, duration));
 
     // test 6: file repair list
     mytimer.start();
@@ -646,54 +648,7 @@ static void checkUnlock() {
     }
 }
 
-static void checkRename(const size_t numFilesToRename) {
-    readAndCheckFileMeta();
-
-    // check the rename result by query using the old name (and expect failures)
-    for (size_t i = 0; i < numFilesToRename; i++) {
-        File rf;
-        rf.copyName(of[i]);
-        if (metastore->getMeta(rf) == true) {
-            printf(">> Failed to get the expected failure reply for the %lu renamed file.\n", i);
-            exitWithError();
-        }
-    }
-}
-
-
-/**
- *  Test cases
- **/
-
-void metaWrite(MetaStore* metastore) {
-    // write file metadata
-    for (size_t i = 0; i < numFilesToTest; i++)
-        if (!metastore->putMeta(f[i])) {
-            printf(">> Failed to put file %lu metadata\n", i);
-            exitWithError();
-        }
-}
-
-void metaUpdate(MetaStore* metastore) {
-    // update file metadata
-    for (size_t i = 0; i < numFilesToTest; i++)
-        metastore->putMeta(f[i]);
-}
-
-void metaLock(MetaStore *metastore) {
-    // suppress error message due to failed file locking attempts
-    // fclose(stderr);
-
-    // lock files
-    for (size_t i = 0; i < numFilesToTest; i++) {
-        if (!metastore->lockFile(f[i])) {
-            printf(">> Failed to lock file %lu\n", i);
-            exitWithError();
-        }
-    }
-}
-
-void metaList(MetaStore *metastore) {
+static void checkList(MetaStore *metastore) {
     FileInfo *flist;
     size_t totalFileCount = 0, fileCount = 0;
     for (size_t i = 0; i < 255; i++, totalFileCount += fileCount) {
@@ -767,6 +722,61 @@ void metaList(MetaStore *metastore) {
     if (metastore->getNumFiles() != numFilesToTest) {
         printf(">> File count in metadata store mismatched (%lu vs %lu)\n", metastore->getNumFiles(), numFilesToTest);
         exitWithError();
+    }
+}
+
+static void checkRename(const size_t numFilesToRename) {
+    readAndCheckFileMeta();
+
+    // check the rename result by query using the old name (and expect failures)
+    for (size_t i = 0; i < numFilesToRename; i++) {
+        File rf;
+        rf.copyName(of[i]);
+        if (metastore->getMeta(rf) == true) {
+            printf(">> Failed to get the expected failure reply for the %lu renamed file.\n", i);
+            exitWithError();
+        }
+    }
+}
+
+
+/**
+ *  Test cases
+ **/
+
+void metaWrite(MetaStore* metastore) {
+    // write file metadata
+    for (size_t i = 0; i < numFilesToTest; i++)
+        if (!metastore->putMeta(f[i])) {
+            printf(">> Failed to put file %lu metadata\n", i);
+            exitWithError();
+        }
+}
+
+void metaUpdate(MetaStore* metastore) {
+    // update file metadata
+    for (size_t i = 0; i < numFilesToTest; i++)
+        metastore->putMeta(f[i]);
+}
+
+void metaLock(MetaStore *metastore) {
+    // suppress error message due to failed file locking attempts
+    fclose(stderr);
+
+    // lock files
+    for (size_t i = 0; i < numFilesToTest; i++) {
+        if (!metastore->lockFile(f[i])) {
+            printf(">> Failed to lock file %lu\n", i);
+            exitWithError();
+        }
+    }
+}
+
+void metaList(MetaStore *metastore) {
+    FileInfo *flist;
+    size_t totalFileCount = 0, fileCount = 0;
+    for (size_t i = 0; i < 255; i++, totalFileCount += fileCount) {
+        fileCount = metastore->getFileList(&flist, i);    
     }
 }
 
