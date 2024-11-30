@@ -289,8 +289,7 @@ bool FDBMetaStore::putMeta(const File &f)
     // file prefix set: add filePrefixKey (filePrefix_filename)
     std::string filePrefix = getFilePrefix(fileKey);
     std::string filePrefixKey = filePrefix + std::string("_") + std::string(f.name, f.nameLength);
-    // Note: value is not used
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefixKey.c_str()), filePrefixKey.size(), reinterpret_cast<const uint8_t *>(fileKey), fileKeyLength);
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(filePrefixKey.c_str()), filePrefixKey.size(), reinterpret_cast<const uint8_t *>(f.name), f.nameLength);
 
     // directory set: add dirKey (FDB_DIR_LIST_KEY_PREFIX_filePrefix)
     std::string dirKey = std::string(FDB_DIR_LIST_KEY_PREFIX) + std::string("_") + filePrefix;
@@ -315,7 +314,6 @@ bool FDBMetaStore::putMeta(const File &f)
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(cmt));
-
     fdb_future_destroy(cmt);
 
     // DLOG(INFO) << "FDBMetaStore:: putMeta() finished";
@@ -441,8 +439,9 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     {
         LOG(WARNING) << "FDBMetaStore::getMeta() invalid UUID: " << retrievedUUID;
 
-        // commit transaction and return
         delete verFmjPtr;
+
+        // commit transaction
         FDBFuture *cmt = fdb_transaction_commit(tx);
         exitOnError(fdb_future_block_until_ready(cmt));
         fdb_future_destroy(cmt);
@@ -485,8 +484,9 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
     {
         LOG(ERROR) << "FDBMetaStore::getMeta() Failed to allocate space for container ids";
 
-        // commit transaction and return
         delete verFmjPtr;
+
+        // commit transaction
         FDBFuture *cmt = fdb_transaction_commit(tx);
         exitOnError(fdb_future_block_until_ready(cmt));
         fdb_future_destroy(cmt);
@@ -572,9 +572,9 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
         }
     }
 
-    // commit transaction
     delete verFmjPtr;
 
+    // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
@@ -721,9 +721,7 @@ bool FDBMetaStore::deleteMeta(File &f)
     // remove file metadata
     bool removeFileMeta = (isVersioned && fmj["verId"].size() == 0) || !isVersioned;
     if (!removeFileMeta)
-    {
-        // update file meta (only remove a specified version)
-
+    { // update file meta (only remove a specified version)
         // benchmark time (start)
         parsingTimer.start();
 
@@ -773,7 +771,6 @@ bool FDBMetaStore::deleteMeta(File &f)
     std::vector<std::pair<std::string, std::string>> fileNamesWithPrefix;
     if (getKVPairsWithKeyPrefixInTX(tx, std::string(filePrefix + "_"), fileNamesWithPrefix) == 0)
     {
-        LOG(ERROR) << "FDBMetaStore::deleteMeta() Error getting file keys with prefix " << filePrefix;
         exit(1);
     }
 
@@ -941,9 +938,10 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     std::string srcFilePrefix = getFilePrefix(srcFileKey);
     std::string srcFilePrefixKey = srcFilePrefix + std::string("_") + std::string(sf.name, sf.nameLength);
     fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(srcFilePrefixKey.c_str()), srcFilePrefixKey.size());
+
     std::string dstFilePrefix = getFilePrefix(dstFileKey);
     std::string dstFilePrefixKey = dstFilePrefix + std::string("_") + std::string(df.name, df.nameLength);
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFilePrefixKey.c_str()), dstFilePrefixKey.size(), reinterpret_cast<const uint8_t *>(std::string(dstFileKey, dstFileKeyLength).c_str()), dstFileKeyLength);
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstFilePrefixKey.c_str()), dstFilePrefixKey.size(), reinterpret_cast<const uint8_t *>(std::string(df.name, df.nameLength).c_str()), df.nameLength);
 
     // directory set: check whether src file prefix set has any files
     // if no files: remove srcDirKey (FDB_DIR_LIST_KEY_PREFIX_filePrefix)
@@ -951,7 +949,6 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     std::vector<std::pair<std::string, std::string>> srcFileNamesWithPrefix;
     if (getKVPairsWithKeyPrefixInTX(tx, std::string(srcFilePrefix + "_"), srcFileNamesWithPrefix) == 0)
     {
-        LOG(ERROR) << "FDBMetaStore::renameMeta() Error getting file keys with prefix " << srcFilePrefix;
         exit(1);
     }
 
@@ -962,7 +959,7 @@ bool FDBMetaStore::renameMeta(File &sf, File &df)
     }
 
     std::string dstDirKey = std::string(FDB_DIR_LIST_KEY_PREFIX) + std::string("_") + dstFilePrefix;
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstDirKey.c_str()), dstDirKey.size(), reinterpret_cast<const uint8_t *>(std::string(dstFileKey, dstFileKeyLength).c_str()), dstFileKeyLength);
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(dstDirKey.c_str()), dstDirKey.size(), reinterpret_cast<const uint8_t *>(dstFilePrefix.c_str()), dstFilePrefix.size());
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -1145,9 +1142,9 @@ int FDBMetaStore::updateChunks(const File &f, int version)
         return false;
     }
 
-    nlohmann::json *vfmjPtr = new nlohmann::json();
-    auto &vfmj = *vfmjPtr;
-    if (parseStrToJSONObj(verFileMetaStr, vfmj) == false)
+    nlohmann::json *verFmjPtr = new nlohmann::json();
+    auto &verFmj = *verFmjPtr;
+    if (parseStrToJSONObj(verFileMetaStr, verFmj) == false)
     {
         exit(1);
     }
@@ -1159,14 +1156,15 @@ int FDBMetaStore::updateChunks(const File &f, int version)
         genChunkKeyPrefix(f.chunks[i].getChunkId(), chunkName);
 
         std::string cidKey = std::string(chunkName) + std::string("-cid");
-        vfmj[cidKey.c_str()] = std::to_string(f.containerIds[i]);
+        verFmj[cidKey.c_str()] = std::to_string(f.containerIds[i]);
         std::string csizeKey = std::string(chunkName) + std::string("-size");
-        vfmj[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
+        verFmj[csizeKey.c_str()] = std::to_string(f.chunks[i].size);
     }
 
-    std::string vfmjStr = vfmj.dump();
-    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey.size()), verFileKey.size(), reinterpret_cast<const uint8_t *>(vfmjStr.c_str()), vfmjStr.size());
-    delete vfmjPtr;
+    std::string verFmjStr = verFmj.dump();
+    fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(verFileKey.size()), verFileKey.size(), reinterpret_cast<const uint8_t *>(verFmjStr.c_str()), verFmjStr.size());
+
+    delete verFmjPtr;
 
     // commit transaction
     FDBFuture *cmt = fdb_transaction_commit(tx);
@@ -1228,8 +1226,6 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
     // get file keys with prefix
     if (getKVPairsWithKeyPrefixInTX(tx, prefixWithNS, candidateFileMetas) == false)
     {
-        LOG(ERROR) << "FDBMetaStore::getFileList() Error getting file keys with prefix " << prefixWithNS;
-
         exit(1);
     }
 
@@ -1290,13 +1286,13 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
                 LOG(ERROR) << "FDBMetaStore::getFileList() failed to get metadata for file " << cur.name;
                 continue;
             }
-            nlohmann::json *vfmjPtr = new nlohmann::json();
-            auto &vfmj = *vfmjPtr;
+            nlohmann::json *verFmjPtr = new nlohmann::json();
+            auto &verFmj = *verFmjPtr;
 
             // benchmark time (start)
             parsingTimer.start();
 
-            if (parseStrToJSONObj(verFileMetaStr, vfmj) == false)
+            if (parseStrToJSONObj(verFileMetaStr, verFmj) == false)
             {
                 exit(1);
             }
@@ -1305,29 +1301,31 @@ unsigned int FDBMetaStore::getFileList(FileInfo **list, unsigned char namespaceI
             duration = parsingTimer.elapsed().wall;
             parsingTimeSec += duration / 1e9;
 
-            cur.size = vfmj["size"].get<unsigned long int>();
-            cur.ctime = vfmj["ctime"].get<time_t>();
-            cur.atime = vfmj["atime"].get<time_t>();
-            cur.mtime = vfmj["mtime"].get<time_t>();
-            cur.version = vfmj["ver"].get<int>();
-            cur.isDeleted = vfmj["dm"].get<int>();
-            ChecksumCalculator::unHex(vfmj["md5"].get<std::string>(), cur.md5, MD5_DIGEST_LENGTH);
-            cur.numChunks = vfmj["numC"].get<int>();
+            cur.size = verFmj["size"].get<unsigned long int>();
+            cur.ctime = verFmj["ctime"].get<time_t>();
+            cur.atime = verFmj["atime"].get<time_t>();
+            cur.mtime = verFmj["mtime"].get<time_t>();
+            cur.version = verFmj["ver"].get<int>();
+            cur.isDeleted = verFmj["dm"].get<int>();
+            ChecksumCalculator::unHex(verFmj["md5"].get<std::string>(), cur.md5, MD5_DIGEST_LENGTH);
+            cur.numChunks = verFmj["numC"].get<int>();
             // staged last modified time
-            time_t staged_mtime = vfmj["sg_mtime"].get<time_t>();
+            time_t staged_mtime = verFmj["sg_mtime"].get<time_t>();
             if (staged_mtime > cur.mtime)
             {
                 cur.mtime = staged_mtime;
                 cur.atime = staged_mtime;
-                cur.size = vfmj["sg_size"].get<unsigned long int>();
+                cur.size = verFmj["sg_size"].get<unsigned long int>();
             }
-            cur.storageClass = vfmj["sc"].get<std::string>();
+            cur.storageClass = verFmj["sc"].get<std::string>();
 
-            delete vfmjPtr;
+            delete verFmjPtr;
         }
         // do not add delete marker to the list unless for queries on versions
         if (!withVersions && cur.isDeleted)
         {
+            delete fmjPtr;
+
             continue;
         }
         if (withVersions && cur.version > 0)
@@ -1404,8 +1402,6 @@ unsigned int FDBMetaStore::getFolderList(std::vector<std::string> &list, unsigne
     std::vector<std::pair<std::string, std::string>> filePrefixes;
     if (getKVPairsWithKeyPrefixInTX(tx, dirKey, filePrefixes) == 0)
     {
-        LOG(ERROR) << "FDBMetaStore::getFolderList() Error getting file keys with prefix " << dirKey;
-
         exit(1);
     }
 
@@ -1475,8 +1471,6 @@ unsigned long int FDBMetaStore::getNumFilesToRepair()
     std::string fileRepairKey = std::string(FDB_FILE_REPAIR_KEY_PREFIX) + "_";
     if (getKVPairsWithKeyPrefixInTX(tx, fileRepairKey, fileKeys) == 0)
     {
-        LOG(ERROR) << "FDBMetaStore::getNumFilesToRepair() Error getting files to repair";
-
         exit(1);
     }
 
@@ -1500,8 +1494,6 @@ int FDBMetaStore::getFilesToRepair(int numFiles, File files[])
     std::string fileRepairKey = std::string(FDB_FILE_REPAIR_KEY_PREFIX) + "_";
     if (getKVPairsWithKeyPrefixInTX(tx, fileRepairKey, fileKeys) == 0)
     {
-        LOG(ERROR) << "FDBMetaStore::getNumFilesToRepair() Error getting files to repair";
-
         exit(1);
     }
 
@@ -1781,8 +1773,6 @@ bool FDBMetaStore::getNextFileForTaskCheck(File &file)
     std::vector<std::pair<std::string, std::string>> fileKeys;
     if (getKVPairsWithKeyPrefixInTX(tx, taskCheckKey, fileKeys) == 0)
     {
-        LOG(ERROR) << "FDBMetaStore::getNextFileForTaskCheck() Error getting file keys from " << FDB_BG_TASK_PENDING_KEY_PREFIX;
-
         exit(1);
     }
 
@@ -2060,7 +2050,6 @@ bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const
     else if (lockExist == true && lock == false)
     { // remove the fileKey
         fdb_transaction_clear(tx, reinterpret_cast<const uint8_t *>(lockKey.c_str()), lockKey.size());
-
         retVal = true;
     }
 
