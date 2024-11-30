@@ -1644,13 +1644,13 @@ int FDBMetaStore::getFilesPendingWriteToCloud(int numFiles, File files[])
     {
         // NOTE: ignored "*_not_exists" in Redis-based MetaStore for now
         std::string filePendingWriteKey = std::string(FDB_FILE_PENDING_WRITE_KEY_PREFIX) + std::string("_");
-        std::vector<std : pair<std::string, std::string>> fileKeys;
-        if (getKVpairsWithKeyPrefixInTX(tx, filePendingWriteKey, fileKeys) == 0)
+        std::vector<std::pair<std::string, std::string>> fileKeys;
+        if (getKVPairsWithKeyPrefixInTX(tx, filePendingWriteKey, fileKeys) == 0)
         {
             exit(1);
         }
         // copy the files to snapshot
-        for (int i = 0; i < fileKeys.size(); i++)
+        for (size_t i = 0; i < fileKeys.size(); i++)
         {
             std::string &fileKey = fileKeys[i].second;
             std::string listKey = filePendingWriteCopyKey + fileKey;
@@ -1746,7 +1746,7 @@ bool FDBMetaStore::updateFileStatus(const File &file)
     exitOnError(fdb_future_block_until_ready(cmt));
     fdb_future_destroy(cmt);
 
-    return ret;
+    return true;
 }
 
 bool FDBMetaStore::getNextFileForTaskCheck(File &file)
