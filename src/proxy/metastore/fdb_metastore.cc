@@ -17,14 +17,14 @@
 
 // change defs's prefix to FDB_
 #define FDB_FILE_PREFIX "//pf_"
-#define FDB_FILE_LOCK_KEY_PREFIX "//snccFLock_"
-#define FDB_FILE_PIN_STAGED_KEY_PREFIX "//snccFPinStaged_"
-#define FDB_FILE_REPAIR_KEY_PREFIX "//snccFRepair_"
-#define FDB_FILE_PENDING_WRITE_KEY_PREFIX "//snccFPendingWrite_"
-#define FDB_FILE_PENDING_WRITE_COMP_KEY_PREFIX "//snccFPendingWriteComp_"
-#define FDB_BG_TASK_PENDING_KEY_PREFIX "//snccFBgTask_"
-#define FDB_DIR_LIST_KEY_PREFIX "//snccDirList_"
-#define FDB_JL_LIST_KEY_PREFIX "//snccJournalFSet_"
+#define FDB_FILE_LOCK_KEY_PREFIX "//snccFLock"
+#define FDB_FILE_PIN_STAGED_KEY_PREFIX "//snccFPinStaged"
+#define FDB_FILE_REPAIR_KEY_PREFIX "//snccFRepair"
+#define FDB_FILE_PENDING_WRITE_KEY_PREFIX "//snccFPendingWrite"
+#define FDB_FILE_PENDING_WRITE_COMP_KEY_PREFIX "//snccFPendingWriteComp"
+#define FDB_BG_TASK_PENDING_KEY_PREFIX "//snccFBgTask"
+#define FDB_DIR_LIST_KEY_PREFIX "//snccDirList"
+#define FDB_JL_LIST_KEY_PREFIX "//snccJournalFSet"
 
 // FDB system keys
 #define FDB_NUM_RESERVED_SYSTEM_KEYS (1)
@@ -37,7 +37,7 @@ static std::tuple<int, std::string, int> extractJournalFieldKeyParts(const char 
 
 FDBMetaStore::FDBMetaStore()
 {
-    Config &config = Config::getInstance();
+    // Config &config = Config::getInstance();
 
     // select API version
     fdb_select_api_version(FDB_API_VERSION);
@@ -91,7 +91,7 @@ bool FDBMetaStore::putMeta(const File &f)
     fVerSummary.append(std::to_string(f.size).append(" "));
     fVerSummary.append(std::to_string(f.mtime).append(" "));
     std::string fileMd5 = ChecksumCalculator::toHex(f.md5, MD5_DIGEST_LENGTH);
-    fVerSummary.append(fileMd5.append(" "));
+    fVerSummary.append(fileMd5 + std::string(" "));
     fVerSummary.append(std::to_string(((f.size == 0) ? f.isDeleted : 0)).append(" "));
     fVerSummary.append(std::to_string(f.numChunks));
 
@@ -1599,7 +1599,7 @@ bool FDBMetaStore::markFileStatus(const File &file, const char *listName, bool s
     { // add the file to the list
         if (found == false)
         {
-            fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(listKey.c_str()), listKey.size(), reinterpret_cast<const uint8_t *>(verFileKeyStr.c_str()), verFileKeyStr.size());
+            fdb_transaction_set(tx, reinterpret_cast<const uint8_t *>(listKey.c_str()), listKey.size(), reinterpret_cast<const uint8_t *>(verFileKey), verFileKeyLength);
             retVal = 1;
         }
     }
@@ -2027,12 +2027,12 @@ std::string FDBMetaStore::getFilePrefix(const char name[], bool noEndingSlash)
 
 bool FDBMetaStore::getLockOnFile(const File &file, bool lock)
 {
-    return lockFile(file, lock, FDB_FILE_LOCK_KEY, "lock");
+    return lockFile(file, lock, FDB_FILE_LOCK_KEY_PREFIX, "lock");
 }
 
 bool FDBMetaStore::pinStagedFile(const File &file, bool lock)
 {
-    return lockFile(file, lock, FDB_FILE_PIN_STAGED_KEY, "pin");
+    return lockFile(file, lock, FDB_FILE_PIN_STAGED_KEY_PREFIX, "pin");
 }
 
 bool FDBMetaStore::lockFile(const File &file, bool lock, const char *type, const char *name)
