@@ -248,7 +248,16 @@ bool FDBMetaStore::putMeta(const File &f)
         std::string blockNameStr(blockName, blockNameLength);
         std::string fp = it->second.first.get();
         // logical offset, length, fingerprint, physical offset
-        verFmj[blockNameStr.c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data() + std::to_string(it->second.second);
+        std::string bLogicalOffsetKey = blockNameStr + "-lo";
+        std::string bLengthKey = blockNameStr + "-l";
+        std::string bFPKey = blockNameStr + "-fp";
+        std::string bPhysicalOffsetKey = blockNameStr + "-po";
+
+        verFmj[bLogicalOffsetKey.c_str()] = it->first._offset;
+        verFmj[bLengthKey.c_str()] = it->first._length;
+        verFmj[bFPKey.c_str()] = fp.data();
+        verFmj[bPhysicalOffsetKey.c_str()] = it->second.second; 
+
     }
     blockId = 0;
     for (auto it = f.duplicateBlocks.begin(); it != f.duplicateBlocks.end(); it++, blockId++)
@@ -257,7 +266,13 @@ bool FDBMetaStore::putMeta(const File &f)
         std::string blockNameStr(blockName, blockNameLength);
         std::string fp = it->second.get();
         // logical offset, length, fingerprint
-        verFmj[blockNameStr.c_str()] = std::to_string(it->first._offset) + std::to_string(it->first._length) + fp.data();
+        std::string bLogicalOffsetKey = blockNameStr + "-lo";
+        std::string bLengthKey = blockNameStr + "-l";
+        std::string bFPKey = blockNameStr + "-fp";
+
+        verFmj[bLogicalOffsetKey.c_str()] = it->first._offset;
+        verFmj[bLengthKey.c_str()] = it->first._length;
+        verFmj[bFPKey.c_str()] = fp.data();
     }
 
     // benchmark time (start)
@@ -522,27 +537,21 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     if (getBlocks == 1 || getBlocks == 3)
     { // unique blocks
-        size_t pOffset = 0;
-        size_t noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
-        size_t hasFpOfs = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
-        size_t lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH + sizeof(int);
         for (size_t blockId = 0; blockId < numUniqueBlocks; blockId++)
         {
             int blockNameLength = genBlockKey(blockId, blockName, /* is unique */ true);
             std::string blockNameStr(blockName, blockNameLength);
-            std::string blockStr = verFmj[blockNameStr.c_str()].get<std::string>();
-            loc._offset = std::stoull(blockStr.substr(pOffset, sizeof(unsigned long int)));
-            loc._length = std::stoull(blockStr.substr(pOffset + sizeof(unsigned long int), sizeof(unsigned int)));
-            if (verFmj[blockNameStr.c_str()].size() >= lengthWithFp)
-            {
-                std::string fpStr = blockStr.substr(pOffset + hasFpOfs, SHA256_DIGEST_LENGTH);
-                fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
-            }
-            else
-            {
-                std::string fpStr = blockStr.substr(pOffset + noFpOfs, SHA256_DIGEST_LENGTH);
-                fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
-            }
+            // logical offset, length, fingerprint, physical offset
+            std::string bLogicalOffsetKey = blockNameStr + "-lo";
+            std::string bLengthKey = blockNameStr + "-l";
+            std::string bFPKey = blockNameStr + "-fp";
+            std::string bPhysicalOffsetKey = blockNameStr + "-po";
+
+            loc._offset = verFmj[bLogicalOffsetKey.c_str()].get<unsigned long int>();
+            loc._length = verFmj[bLengthKey.c_str()].get<unsigned int>();
+            std::string fpStr = verFmj[bFPKey.c_str()].get<std::string>();
+            fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
+            int pOffset = verFmj[bPhysicalOffsetKey.c_str()].get<int>();
 
             auto followIt = f.uniqueBlocks.end(); // hint is the item after the element to insert for c++11, and before the element for c++98
             f.uniqueBlocks.emplace_hint(followIt, std::make_pair(loc, std::make_pair(fp, pOffset)));
@@ -551,26 +560,25 @@ bool FDBMetaStore::getMeta(File &f, int getBlocks)
 
     if (getBlocks == 2 || getBlocks == 3)
     { // duplicate blocks
-        size_t noFpOfs = sizeof(unsigned long int) + sizeof(unsigned int);
-        size_t lengthWithFp = sizeof(unsigned long int) + sizeof(unsigned int) + SHA256_DIGEST_LENGTH;
-
         for (size_t blockId = 0; blockId < numDuplicateBlocks; blockId++)
         {
             int blockNameLength = genBlockKey(blockId, blockName, /* is unique */ false);
             std::string blockNameStr(blockName, blockNameLength);
-            loc._offset = std::stoull(verFmj[blockNameStr.c_str()].get<std::string>().substr(0, sizeof(unsigned long int)));
-            loc._length = std::stoull(verFmj[blockNameStr.c_str()].get<std::string>().substr(sizeof(unsigned long int), sizeof(unsigned int)));
+            // logical offset, length, fingerprint
+            std::string bLogicalOffsetKey = blockNameStr + "-lo";
+            std::string bLengthKey = blockNameStr + "-l";
+            std::string bFPKey = blockNameStr + "-fp";
 
-            if (verFmj[blockNameStr.c_str()].size() >= lengthWithFp)
-            {
-                std::string fpStr = verFmj[blockNameStr.c_str()].get<std::string>().substr(noFpOfs, SHA256_DIGEST_LENGTH);
-                fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
-            }
+            loc._offset = verFmj[bLogicalOffsetKey.c_str()].get<unsigned long int>();
+            loc._length = verFmj[bLengthKey.c_str()].get<unsigned int>();
+            std::string fpStr = verFmj[bFPKey.c_str()].get<std::string>();
+            fp.set(fpStr.c_str(), SHA256_DIGEST_LENGTH);
 
             auto followIt = f.duplicateBlocks.end(); // hint is the item after the element to insert for c++11, and before the element for c++98
             f.duplicateBlocks.emplace_hint(followIt, std::make_pair(loc, fp));
         }
     }
+
 
     delete verFmjPtr;
 
